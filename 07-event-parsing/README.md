@@ -98,16 +98,23 @@ BlockSyncer 实现了区块同步的主循环：
 
 ```
 07-event-parsing/
-  README.md              -- 模块概述（本文件）
-  goals.md               -- 学习目标与自检问题
-  notes.md               -- 深度技术笔记
+  README.md                -- 模块概述（本文件）
+  goals.md                 -- 学习目标与自检问题
+  notes.md                 -- 深度技术笔记
   demo/
-    parser_registry.go   -- 事件解析器注册机制
-    solana_parsers.go    -- Solana 事件解析器（Raydium/PumpFun/Transfer）
-    evm_parsers.go       -- EVM 事件解析器（UniV2 Swap/ERC20 Transfer）
-    syncer.go            -- BlockSyncer 区块同步主循环
-    main.go              -- 可运行的演示程序
-    event_test.go        -- 测试
+    parser_registry.go     -- 事件解析器注册机制（支持 CPI、复合键匹配）
+    solana_parsers.go      -- Solana 事件解析器（Raydium/PumpFun/Transfer）
+    evm_parsers.go         -- EVM 事件解析器（UniV2 Swap/ERC20 Transfer）
+    uniswap_v3_parser.go   -- UniswapV3 Swap 解析器（有符号金额、sqrtPriceX96）
+    inner_instructions.go  -- CPI 递归解析（FlattenInstructions 展平内部指令）
+    balance_diff.go        -- 余额差异计算与交叉验证
+    tx_classifier.go       -- 交易分类器（4×4 地址类型矩阵 → TxType）
+    address_filter.go      -- 地址过滤器（Bloom Filter 原理 + map 实现）
+    pipeline.go            -- Pipeline Stage 管道架构（5 阶段链式处理）
+    syncer.go              -- BlockSyncer 区块同步主循环
+    main.go                -- 可运行的演示程序
+    event_test.go          -- 基础测试
+    advanced_test.go       -- 新增组件测试（CPI/余额/分类/过滤/管道/V3）
 ```
 
 ## 与生产系统的差距

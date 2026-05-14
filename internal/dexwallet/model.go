@@ -265,16 +265,59 @@ const (
 // ----- 交易状态 -----
 
 // TxStatus 交易状态。
+// 对标 irwallet walletmodel/status.go 的 8 态状态机设计。
+// 注意：超时不是一个独立状态，而是触发 Replace 或 Error 的原因。
 type TxStatus string
 
 const (
-	TxStatusPending   TxStatus = "pending"   // 已发送，等待确认
-	TxStatusConfirmed TxStatus = "confirmed" // 已确认（上链成功）
-	TxStatusFailed    TxStatus = "failed"    // 链上执行失败（Solana: meta.err / EVM: status=0）
-	TxStatusTimeout   TxStatus = "timeout"   // 超时未确认
-	TxStatusRevert    TxStatus = "revert"    // 重组回滚（曾经确认但被分叉取消）
-	TxStatusReplace   TxStatus = "replace"   // 被 RBF 替代（EVM: 同 nonce 更高 Gas 的新交易上链）
+	TxStatusNew       TxStatus = "new"       // 0: 新建，等待构建
+	TxStatusReady     TxStatus = "ready"     // 1: 已构建，等待广播
+	TxStatusPending   TxStatus = "pending"   // 2: 已广播，等待确认
+	TxStatusConfirmed TxStatus = "confirmed" // 3: 已确认，交易成功
+	TxStatusFailed    TxStatus = "failed"    // 4: 链上执行失败（Solana: meta.err / EVM: status=0）
+	TxStatusRevert    TxStatus = "revert"    // 5: 重组回滚（曾经确认但被分叉取消）
+	TxStatusReplace   TxStatus = "replace"   // 6: 被 RBF 替代（EVM: 同 nonce 更高 Gas 的新交易上链）
+	TxStatusError     TxStatus = "error"     // 7: 处理出错（内部错误，如超时、签名失败等）
 )
+
+// ValidTransitions 定义合法的状态转移。
+// 对标 irwallet walletmodel/status.go 的状态机设计：
+//
+//     ┌──────────────────────────────────────────────┐
+//     │                                              │
+//     ▼                                              │
+//   [New] → [Ready] → [Pending] → [Confirmed]       │
+//     │        │         │    ↘     ↓                │
+//     │        │         │   [Failed] [Revert]       │
+//     │        │         │         ↓                 │
+//     │        │         └──→ [Replace]              │
+//     │        │                                     │
+//     └────────┴────────────────→ [Error] ──────────┘
+//
+var ValidTransitions = map[TxStatus][]TxStatus{
+	TxStatusNew:       {TxStatusReady, TxStatusError},
+	TxStatusReady:     {TxStatusPending, TxStatusError},
+	TxStatusPending:   {TxStatusConfirmed, TxStatusFailed, TxStatusRevert, TxStatusReplace, TxStatusError},
+	TxStatusConfirmed: {TxStatusRevert},  // 确认后被分叉
+	TxStatusFailed:    {},                // 终态
+	TxStatusRevert:    {TxStatusPending}, // 重组后可重新广播
+	TxStatusReplace:   {},                // 终态
+	TxStatusError:     {TxStatusNew},     // 可以重试
+}
+
+// CanTransition 检查状态转移是否合法。
+func CanTransition(from, to TxStatus) bool {
+	targets, ok := ValidTransitions[from]
+	if !ok {
+		return false
+	}
+	for _, t := range targets {
+		if t == to {
+			return true
+		}
+	}
+	return false
+}
 
 // TxRecord 交易记录（对标生产中 swaptx 表）。
 type TxRecord struct {
@@ -292,6 +335,8 @@ type TxRecord struct {
 	PriorityFee *big.Int `json:"priority_fee"`
 
 	Status    TxStatus  `json:"status"`
+	Timeout   time.Duration `json:"timeout,omitempty"`   // 超时设置
+	ErrorMsg  string        `json:"error_msg,omitempty"` // 错误信息
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

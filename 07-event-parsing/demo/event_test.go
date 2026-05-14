@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"sync"
 	"testing"
@@ -725,6 +726,10 @@ func TestSyncerEmptyBlocks(t *testing.T) {
 }
 
 func TestSyncerContextCancel(t *testing.T) {
+	// 临时提高日志级别，避免 infiniteBlockProducer 在 100ms 内产生大量 INFO 日志
+	oldLevel := slog.SetLogLoggerLevel(slog.LevelError)
+	defer slog.SetLogLoggerLevel(oldLevel)
+
 	registry := NewParserRegistry(coinset.ChainSolana)
 
 	// 无限区块生产者

@@ -144,9 +144,9 @@ func (s *BaseTxSender) Confirm(ctx context.Context, txHash string) (TxStatus, er
 		select {
 		case <-confirmCtx.Done():
 			if s.repo != nil {
-				_ = s.repo.UpdateTxStatus(ctx, txHash, TxStatusTimeout)
+				_ = s.repo.UpdateTxStatus(ctx, txHash, TxStatusError)
 			}
-			return TxStatusTimeout, fmt.Errorf("confirm timeout for tx %s", txHash)
+			return TxStatusError, fmt.Errorf("confirm timeout for tx %s", txHash)
 
 		case <-ticker.C:
 			status, err := checker(confirmCtx, txHash)
