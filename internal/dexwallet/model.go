@@ -214,6 +214,9 @@ const (
 )
 
 // ChainEvent 解析后的链上事件。
+//
+// 生产中对标 irwallet 的 ChainTransaction + evmwallet 的 ParsedEvent。
+// 同时包含交易元信息和解析后的业务语义，供下游分类和分发使用。
 type ChainEvent struct {
 	Type    EventType       `json:"type"`
 	ChainID coinset.ChainID `json:"chain_id"`
@@ -228,8 +231,36 @@ type ChainEvent struct {
 	AmountIn  *big.Int `json:"amount_in,omitempty"`
 	AmountOut *big.Int `json:"amount_out,omitempty"`
 
+	// 交易元信息（生产必需）
+	Sender   string   `json:"sender,omitempty"`   // 交易发起者（Solana: tx.Signatures[0] 对应公钥 / EVM: tx.from）
+	Receiver string   `json:"receiver,omitempty"` // 接收者（Transfer 目标地址）
+	Fee      *big.Int `json:"fee,omitempty"`      // 交易手续费（lamports / wei）
+	Success  bool     `json:"success"`            // 交易是否成功（Solana: meta.err==nil / EVM: receipt.status==1）
+
+	// 事件分类（由 TxClassifier 填充）
+	TxType TxType `json:"tx_type,omitempty"` // inbound/outbound/swap/system/unknown
+
+	// CPI 来源追踪（Solana 特有）
+	ProgramID        string `json:"program_id,omitempty"`         // 产生此事件的 Program
+	InstructionIndex int    `json:"instruction_index,omitempty"`  // 在展平后指令列表中的位置
+	IsInnerInst      bool   `json:"is_inner_inst,omitempty"`      // 是否来自 CPI（内部指令）
+	ParentProgramID  string `json:"parent_program_id,omitempty"`  // CPI 调用者的 ProgramID
+
 	Timestamp time.Time `json:"timestamp"`
 }
+
+// TxType 交易分类类型。
+// 对标 irwallet 的 Classify 矩阵：按 (Sender类型, Receiver类型) 自动分类。
+type TxType string
+
+const (
+	TxTypeInbound  TxType = "inbound"  // 充值：外部地址 → 钱包地址
+	TxTypeOutbound TxType = "outbound" // 提现：钱包地址 → 外部地址
+	TxTypeSwap     TxType = "swap"     // 交换：钱包自身的 DEX 操作
+	TxTypeInternal TxType = "internal" // 内部：钱包地址 → 钱包地址
+	TxTypeSystem   TxType = "system"   // 系统：租金回收、账户创建等
+	TxTypeUnknown  TxType = "unknown"  // 未知：无法分类
+)
 
 // ----- 交易状态 -----
 
@@ -237,10 +268,12 @@ type ChainEvent struct {
 type TxStatus string
 
 const (
-	TxStatusPending   TxStatus = "pending"
-	TxStatusConfirmed TxStatus = "confirmed"
-	TxStatusFailed    TxStatus = "failed"
-	TxStatusTimeout   TxStatus = "timeout"
+	TxStatusPending   TxStatus = "pending"   // 已发送，等待确认
+	TxStatusConfirmed TxStatus = "confirmed" // 已确认（上链成功）
+	TxStatusFailed    TxStatus = "failed"    // 链上执行失败（Solana: meta.err / EVM: status=0）
+	TxStatusTimeout   TxStatus = "timeout"   // 超时未确认
+	TxStatusRevert    TxStatus = "revert"    // 重组回滚（曾经确认但被分叉取消）
+	TxStatusReplace   TxStatus = "replace"   // 被 RBF 替代（EVM: 同 nonce 更高 Gas 的新交易上链）
 )
 
 // TxRecord 交易记录（对标生产中 swaptx 表）。
