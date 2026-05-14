@@ -40,9 +40,11 @@ func NewRaydiumAMMBuilder() *RaydiumAMMBuilder {
 	}
 }
 
-func (b *RaydiumAMMBuilder) DexID() dexwallet.DexID         { return dexwallet.DexRaydiumAMM }
-func (b *RaydiumAMMBuilder) ChainID() coinset.ChainID       { return coinset.ChainSolana }
+func (b *RaydiumAMMBuilder) DexID() dexwallet.DexID              { return dexwallet.DexRaydiumAMM }
+func (b *RaydiumAMMBuilder) ChainID() coinset.ChainID            { return coinset.ChainSolana }
 func (b *RaydiumAMMBuilder) ProtocolType() dexwallet.ProtocolType { return dexwallet.ProtocolAMM }
+func (b *RaydiumAMMBuilder) Label() string                       { return "raydium_amm_solana" }
+func (b *RaydiumAMMBuilder) Simulate(_ context.Context, _ []byte) error { return nil }
 
 func (b *RaydiumAMMBuilder) Build(ctx context.Context, req dexwallet.SwapRequest) (*dexwallet.SwapResult, error) {
 	// 步骤 1: 验证请求参数
@@ -134,9 +136,11 @@ func NewPumpFunBuilder() *PumpFunBuilder {
 	}
 }
 
-func (b *PumpFunBuilder) DexID() dexwallet.DexID         { return dexwallet.DexPumpFun }
-func (b *PumpFunBuilder) ChainID() coinset.ChainID       { return coinset.ChainSolana }
+func (b *PumpFunBuilder) DexID() dexwallet.DexID              { return dexwallet.DexPumpFun }
+func (b *PumpFunBuilder) ChainID() coinset.ChainID            { return coinset.ChainSolana }
 func (b *PumpFunBuilder) ProtocolType() dexwallet.ProtocolType { return dexwallet.ProtocolBondingCurve }
+func (b *PumpFunBuilder) Label() string                        { return "pumpfun_solana" }
+func (b *PumpFunBuilder) Simulate(_ context.Context, _ []byte) error { return nil }
 
 func (b *PumpFunBuilder) Build(ctx context.Context, req dexwallet.SwapRequest) (*dexwallet.SwapResult, error) {
 	// 步骤 1: 验证请求参数
@@ -229,8 +233,10 @@ func NewJupiterBuilder(raydium *RaydiumAMMBuilder, pumpFun *PumpFunBuilder) *Jup
 }
 
 func (b *JupiterBuilder) DexID() dexwallet.DexID         { return dexwallet.DexJupiter }
-func (b *JupiterBuilder) ChainID() coinset.ChainID       { return coinset.ChainSolana }
+func (b *JupiterBuilder) ChainID() coinset.ChainID            { return coinset.ChainSolana }
 func (b *JupiterBuilder) ProtocolType() dexwallet.ProtocolType { return dexwallet.ProtocolAggregator }
+func (b *JupiterBuilder) Label() string                        { return "jupiter_solana" }
+func (b *JupiterBuilder) Simulate(_ context.Context, _ []byte) error { return nil }
 
 func (b *JupiterBuilder) Build(ctx context.Context, req dexwallet.SwapRequest) (*dexwallet.SwapResult, error) {
 	// 步骤 1: 验证请求参数

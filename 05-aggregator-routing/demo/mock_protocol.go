@@ -177,6 +177,19 @@ func (b *MockSwapBuilder) ProtocolType() dexwallet.ProtocolType {
 	return b.protocol
 }
 
+// Simulate 模拟执行交易。
+func (b *MockSwapBuilder) Simulate(_ context.Context, _ []byte) error {
+	if b.shouldFail {
+		return fmt.Errorf("mock simulate failed for %s", b.dexID)
+	}
+	return nil
+}
+
+// Label 返回人类可读标签。
+func (b *MockSwapBuilder) Label() string {
+	return fmt.Sprintf("mock_%s_%s", b.chainID, b.dexID)
+}
+
 // SetShouldFail 设置是否模拟失败。
 func (b *MockSwapBuilder) SetShouldFail(fail bool) {
 	b.shouldFail = fail

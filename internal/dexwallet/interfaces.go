@@ -21,6 +21,14 @@ type SwapBuilder interface {
 
 	// ProtocolType 返回协议类型。
 	ProtocolType() ProtocolType
+
+	// Simulate 模拟执行交易，验证交易是否会成功。
+	// Solana: 调用 simulateTransaction 检查指令是否可执行。
+	// EVM: 调用 eth_estimateGas + eth_call 检查合约调用是否 revert。
+	Simulate(ctx context.Context, txData []byte) error
+
+	// Label 返回人类可读标签（用于日志和监控）。
+	Label() string
 }
 
 // DexProtocol DEX 协议接口，提供报价和价格计算。
@@ -62,6 +70,11 @@ type PoolParser interface {
 
 	// SupportedDex 返回支持的 DEX 列表。
 	SupportedDex() []DexID
+
+	// Owner 返回此解析器负责的 Program/合约地址（路由 key）。
+	// Solana: 返回 Pool Account 的 owner ProgramID
+	// EVM: 返回 Factory 合约地址
+	Owner() string
 }
 
 // Aggregator 多 DEX 聚合接口。

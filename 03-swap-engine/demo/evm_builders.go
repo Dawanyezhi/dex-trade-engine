@@ -54,6 +54,8 @@ func NewUniswapV2Builder() *UniswapV2Builder {
 func (b *UniswapV2Builder) DexID() dexwallet.DexID         { return dexwallet.DexUniswapV2 }
 func (b *UniswapV2Builder) ChainID() coinset.ChainID       { return coinset.ChainEthereum }
 func (b *UniswapV2Builder) ProtocolType() dexwallet.ProtocolType { return dexwallet.ProtocolAMM }
+func (b *UniswapV2Builder) Label() string                        { return "uniswap_v2_ethereum" }
+func (b *UniswapV2Builder) Simulate(_ context.Context, _ []byte) error { return nil }
 
 func (b *UniswapV2Builder) Build(ctx context.Context, req dexwallet.SwapRequest) (*dexwallet.SwapResult, error) {
 	// 步骤 1: 验证请求参数
@@ -162,6 +164,8 @@ func NewPancakeV3Builder() *PancakeV3Builder {
 func (b *PancakeV3Builder) DexID() dexwallet.DexID         { return dexwallet.DexPancakeV3 }
 func (b *PancakeV3Builder) ChainID() coinset.ChainID       { return coinset.ChainBSC }
 func (b *PancakeV3Builder) ProtocolType() dexwallet.ProtocolType { return dexwallet.ProtocolCLMM }
+func (b *PancakeV3Builder) Label() string                        { return "pancake_v3_bsc" }
+func (b *PancakeV3Builder) Simulate(_ context.Context, _ []byte) error { return nil }
 
 func (b *PancakeV3Builder) Build(ctx context.Context, req dexwallet.SwapRequest) (*dexwallet.SwapResult, error) {
 	// 步骤 1: 验证请求参数
@@ -268,6 +272,8 @@ func NewCurveBuilder() *CurveBuilder {
 func (b *CurveBuilder) DexID() dexwallet.DexID         { return dexwallet.DexCurve }
 func (b *CurveBuilder) ChainID() coinset.ChainID       { return coinset.ChainEthereum }
 func (b *CurveBuilder) ProtocolType() dexwallet.ProtocolType { return dexwallet.ProtocolStableSwap }
+func (b *CurveBuilder) Label() string                        { return "curve_ethereum" }
+func (b *CurveBuilder) Simulate(_ context.Context, _ []byte) error { return nil }
 
 func (b *CurveBuilder) Build(ctx context.Context, req dexwallet.SwapRequest) (*dexwallet.SwapResult, error) {
 	// 步骤 1: 验证请求参数
