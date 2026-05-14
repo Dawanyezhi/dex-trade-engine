@@ -33,6 +33,13 @@ func main() {
 	fmt.Println("============================================================")
 	demoBribeServices()
 
+	// ===== 场景 2.5: 贿赂服务健康管理 =====
+	fmt.Println()
+	fmt.Println("============================================================")
+	fmt.Println("场景 2.5: BribeServiceManager 健康管理")
+	fmt.Println("============================================================")
+	demoBribeServiceManager()
+
 	// ===== 场景 3: 优先费推荐 =====
 	fmt.Println()
 	fmt.Println("============================================================")
@@ -252,6 +259,109 @@ func demoBribeServices() {
 	} else {
 		fmt.Printf("发送成功: %s\n", hash)
 	}
+}
+
+// demoBribeServiceManager 演示贿赂服务健康管理。
+func demoBribeServiceManager() {
+	ctx := context.Background()
+
+	// 创建 5 个服务
+	svc1 := NewNextBlockService()
+	svc2 := NewTemporalService()
+	svc3 := NewZeroSlotService()
+	svc4 := NewBlockRazorService()
+	svc5 := NewBlockRushService()
+
+	// 确定性测试：关闭所有随机失败
+	svc1.SetFailRate(0)
+	svc2.SetFailRate(0)
+	svc3.SetFailRate(0)
+	svc4.SetFailRate(0)
+	svc5.SetFailRate(0)
+
+	alertCount := 0
+	config := BribeServiceManagerConfig{
+		MaxConsecutiveFails: 2,
+		CooldownDuration:   200 * time.Millisecond,
+		SendTimeout:        5 * time.Second,
+	}
+
+	mgr := NewBribeServiceManager(
+		[]dexwallet.BribeService{svc1, svc2, svc3, svc4, svc5},
+		config,
+		func() { alertCount++ },
+	)
+
+	txData := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}
+
+	// --- 正常发送 ---
+	fmt.Println("\n--- 正常发送（5 个服务全部健康）---")
+	hash, err := mgr.Send(ctx, txData, big.NewInt(10000))
+	if err != nil {
+		fmt.Printf("发送失败: %v\n", err)
+	} else {
+		fmt.Printf("发送成功: %s\n", hash)
+	}
+	fmt.Printf("健康服务: %d/%d\n", mgr.HealthyCount(), mgr.TotalCount())
+
+	// --- 模拟 3 个服务故障 ---
+	fmt.Println("\n--- 模拟 3 个服务持续故障 ---")
+	svc1.SetFailRate(1.0)
+	svc2.SetFailRate(1.0)
+	svc3.SetFailRate(1.0)
+
+	// 发送多次让故障服务被标记为不健康
+	for i := 0; i < 3; i++ {
+		mgr.Send(ctx, txData, nil)
+	}
+
+	fmt.Printf("健康服务: %d/%d\n", mgr.HealthyCount(), mgr.TotalCount())
+	fmt.Println("各服务状态:")
+	for _, s := range mgr.Stats() {
+		status := "健康"
+		if !s.Healthy {
+			status = "不健康"
+		}
+		fmt.Printf("  %s: %s (成功=%d, 失败=%d, 连续失败=%d)\n",
+			s.Name, status, s.SuccessCount, s.FailCount, s.ConsecutiveFails)
+	}
+
+	// --- 冷却恢复演示 ---
+	fmt.Println("\n--- 冷却恢复（200ms 后故障服务恢复）---")
+	svc1.SetFailRate(0) // 先恢复
+	svc2.SetFailRate(0)
+	svc3.SetFailRate(0)
+
+	time.Sleep(250 * time.Millisecond) // 等待冷却期
+
+	hash, err = mgr.Send(ctx, txData, nil)
+	if err != nil {
+		fmt.Printf("发送失败: %v\n", err)
+	} else {
+		fmt.Printf("发送成功: %s\n", hash)
+	}
+	fmt.Printf("恢复后健康服务: %d/%d\n", mgr.HealthyCount(), mgr.TotalCount())
+
+	// --- 全挂告警演示 ---
+	fmt.Println("\n--- 全挂告警演示 ---")
+	svc1.SetFailRate(1.0)
+	svc2.SetFailRate(1.0)
+	svc3.SetFailRate(1.0)
+	svc4.SetFailRate(1.0)
+	svc5.SetFailRate(1.0)
+
+	alertCount = 0
+	// 发送到全部不健康
+	for i := 0; i < 3; i++ {
+		mgr.Send(ctx, txData, nil)
+	}
+	fmt.Printf("告警触发次数: %d\n", alertCount)
+	fmt.Printf("健康服务: %d/%d\n", mgr.HealthyCount(), mgr.TotalCount())
+
+	fmt.Println("\n结论:")
+	fmt.Println("- 并行广播跳过不健康服务，避免浪费资源")
+	fmt.Println("- 冷却期后自动探测恢复，无需人工干预")
+	fmt.Println("- 全部不可用时触发告警，接入监控系统")
 }
 
 // demoPriorityFee 演示优先费推荐。

@@ -265,6 +265,309 @@ func (a *AntiMEVRPC) SetLatency(d time.Duration) {
 	a.latency = d
 }
 
+// =====================================================================
+// BribeServiceManager -- 贿赂服务健康管理器
+// =====================================================================
+//
+// 设计对比（vs 01-rpc-client/StableClient）：
+//
+//   StableClient（RPC 客户端）：
+//     模式：顺序故障转移（A 失败 → 尝试 B → 尝试 C）
+//     原因：RPC 调用是幂等的读/写操作，只需要一个成功即可
+//     特点：节省资源，按优先级逐个尝试
+//
+//   BribeServiceManager（贿赂服务）：
+//     模式：并行广播（同时发 A+B+C+D+E，取最快成功的）
+//     原因：贿赂服务的核心目标是"最快上链"，多发一份不会有副作用
+//     特点：Solana 交易按签名去重，同一笔交易被多个服务商转发不会重复执行
+//
+// 错误处理策略：
+//   1. 健康追踪：每个服务维护连续失败计数，超过阈值标记为不健康
+//   2. 跳过不健康：并行广播时跳过不健康服务，避免浪费资源和增加无意义的错误日志
+//   3. 冷却恢复：不健康服务过了冷却期后，自动纳入下次广播进行探测
+//   4. 全挂告警：所有服务都不健康时，触发 onAllDown 回调（接入告警系统）
+//   5. 统计记录：记录每个服务的成功/失败次数，用于监控和调优
+//
+// 注意：贿赂服务是 Solana 独有的概念。EVM 链使用 Anti-MEV RPC（私有 mempool），
+// 机制完全不同，不适用此管理器。
+
+// BribeServiceEntry 单个贿赂服务的健康状态和统计信息。
+type BribeServiceEntry struct {
+	service          dexwallet.BribeService
+	healthy          bool
+	consecutiveFails int
+	lastFailTime     time.Time
+	successCount     int64
+	failCount        int64
+}
+
+// BribeServiceManagerConfig 管理器配置。
+type BribeServiceManagerConfig struct {
+	MaxConsecutiveFails int           // 连续失败多少次标记为不健康（默认 3）
+	CooldownDuration   time.Duration // 不健康后多久尝试恢复探测（默认 30s）
+	SendTimeout        time.Duration // 单次发送超时（默认 5s）
+}
+
+// DefaultBribeManagerConfig 返回默认配置。
+func DefaultBribeManagerConfig() BribeServiceManagerConfig {
+	return BribeServiceManagerConfig{
+		MaxConsecutiveFails: 3,
+		CooldownDuration:   30 * time.Second,
+		SendTimeout:        5 * time.Second,
+	}
+}
+
+// BribeServiceManager 贿赂服务健康管理器。
+type BribeServiceManager struct {
+	mu        sync.RWMutex
+	entries   []*BribeServiceEntry
+	config    BribeServiceManagerConfig
+	onAllDown func() // 所有服务不可用时的回调
+}
+
+// NewBribeServiceManager 创建贿赂服务管理器。
+func NewBribeServiceManager(services []dexwallet.BribeService, config BribeServiceManagerConfig, onAllDown func()) *BribeServiceManager {
+	entries := make([]*BribeServiceEntry, len(services))
+	for i, svc := range services {
+		entries[i] = &BribeServiceEntry{
+			service: svc,
+			healthy: true, // 初始假定所有服务健康
+		}
+	}
+	return &BribeServiceManager{
+		entries:   entries,
+		config:    config,
+		onAllDown: onAllDown,
+	}
+}
+
+// sendResult 并行发送的结果。
+type sendResult struct {
+	serviceName string
+	txHash      string
+	err         error
+	entryIdx    int
+}
+
+// Send 并行广播交易到所有可用的贿赂服务，返回第一个成功的结果。
+//
+// 流程：
+//  1. 筛选可用服务（健康的 + 过了冷却期的不健康服务）
+//  2. 并发发送到所有可用服务
+//  3. 取第一个成功结果立即返回
+//  4. 后台收集剩余结果，更新各服务的健康状态
+func (m *BribeServiceManager) Send(ctx context.Context, txData []byte, fee *big.Int) (string, error) {
+	available := m.getAvailableEntries()
+
+	if len(available) == 0 {
+		slog.Error("所有贿赂服务不可用",
+			"total", len(m.entries),
+		)
+		if m.onAllDown != nil {
+			m.onAllDown()
+		}
+		return "", fmt.Errorf("all bribe services unavailable")
+	}
+
+	slog.Debug("并行广播贿赂服务",
+		"available", len(available),
+		"total", len(m.entries),
+	)
+
+	// 并发发送
+	ch := make(chan sendResult, len(available))
+	sendCtx, sendCancel := context.WithTimeout(ctx, m.config.SendTimeout)
+	defer sendCancel()
+
+	for _, ae := range available {
+		go func(entry *BribeServiceEntry, idx int) {
+			hash, err := entry.service.Send(sendCtx, txData, fee)
+			ch <- sendResult{
+				serviceName: entry.service.Name(),
+				txHash:      hash,
+				err:         err,
+				entryIdx:    idx,
+			}
+		}(ae.entry, ae.idx)
+	}
+
+	// 收集结果：取第一个成功的
+	var firstSuccess *sendResult
+	var allErrors []string
+	remaining := len(available)
+
+	for remaining > 0 {
+		result := <-ch
+		remaining--
+
+		if result.err != nil {
+			m.recordFailure(result.entryIdx)
+			allErrors = append(allErrors, fmt.Sprintf("%s: %v", result.serviceName, result.err))
+			slog.Debug("贿赂服务发送失败",
+				"service", result.serviceName,
+				"error", result.err,
+			)
+		} else {
+			m.recordSuccess(result.entryIdx)
+			if firstSuccess == nil {
+				firstSuccess = &result
+				slog.Info("贿赂服务发送成功（首个）",
+					"service", result.serviceName,
+					"tx_hash", result.txHash,
+				)
+				// 不 break，继续收集剩余结果以更新健康状态
+				// 但已有成功结果，后续失败不影响返回值
+			}
+		}
+	}
+
+	if firstSuccess != nil {
+		return firstSuccess.txHash, nil
+	}
+
+	// 所有服务都失败了
+	slog.Error("所有贿赂服务发送失败",
+		"attempted", len(available),
+		"errors", allErrors,
+	)
+
+	// 检查是否全部不健康，触发告警
+	if m.allUnhealthy() && m.onAllDown != nil {
+		m.onAllDown()
+	}
+
+	return "", fmt.Errorf("all %d bribe services failed: %s", len(available), allErrors[0])
+}
+
+// availableEntry 用于 getAvailableEntries 的返回值。
+type availableEntry struct {
+	entry *BribeServiceEntry
+	idx   int
+}
+
+// getAvailableEntries 获取可用的服务列表。
+// 包括：健康的服务 + 过了冷却期的不健康服务（用于探测恢复）。
+func (m *BribeServiceManager) getAvailableEntries() []availableEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []availableEntry
+	now := time.Now()
+
+	for i, entry := range m.entries {
+		if entry.healthy {
+			result = append(result, availableEntry{entry: entry, idx: i})
+		} else if now.Sub(entry.lastFailTime) >= m.config.CooldownDuration {
+			// 过了冷却期，纳入广播进行探测
+			slog.Debug("贿赂服务冷却期结束，尝试恢复探测",
+				"service", entry.service.Name(),
+				"cooldown", m.config.CooldownDuration,
+			)
+			result = append(result, availableEntry{entry: entry, idx: i})
+		}
+	}
+
+	return result
+}
+
+// recordSuccess 记录发送成功，重置健康状态。
+func (m *BribeServiceManager) recordSuccess(idx int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entry := m.entries[idx]
+	wasUnhealthy := !entry.healthy
+
+	entry.healthy = true
+	entry.consecutiveFails = 0
+	entry.successCount++
+
+	if wasUnhealthy {
+		slog.Info("贿赂服务恢复健康",
+			"service", entry.service.Name(),
+		)
+	}
+}
+
+// recordFailure 记录发送失败，可能标记为不健康。
+func (m *BribeServiceManager) recordFailure(idx int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entry := m.entries[idx]
+	entry.consecutiveFails++
+	entry.failCount++
+	entry.lastFailTime = time.Now()
+
+	if entry.healthy && entry.consecutiveFails >= m.config.MaxConsecutiveFails {
+		entry.healthy = false
+		slog.Warn("贿赂服务标记为不健康",
+			"service", entry.service.Name(),
+			"consecutive_fails", entry.consecutiveFails,
+			"threshold", m.config.MaxConsecutiveFails,
+		)
+	}
+}
+
+// allUnhealthy 检查是否所有服务都不健康。
+func (m *BribeServiceManager) allUnhealthy() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, entry := range m.entries {
+		if entry.healthy {
+			return false
+		}
+	}
+	return true
+}
+
+// ServiceStats 单个服务的统计信息。
+type ServiceStats struct {
+	Name             string
+	Healthy          bool
+	ConsecutiveFails int
+	SuccessCount     int64
+	FailCount        int64
+}
+
+// Stats 返回所有服务的统计信息（用于监控）。
+func (m *BribeServiceManager) Stats() []ServiceStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	stats := make([]ServiceStats, len(m.entries))
+	for i, entry := range m.entries {
+		stats[i] = ServiceStats{
+			Name:             entry.service.Name(),
+			Healthy:          entry.healthy,
+			ConsecutiveFails: entry.consecutiveFails,
+			SuccessCount:     entry.successCount,
+			FailCount:        entry.failCount,
+		}
+	}
+	return stats
+}
+
+// HealthyCount 返回健康服务数量。
+func (m *BribeServiceManager) HealthyCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	for _, entry := range m.entries {
+		if entry.healthy {
+			count++
+		}
+	}
+	return count
+}
+
+// TotalCount 返回总服务数量。
+func (m *BribeServiceManager) TotalCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.entries)
+}
+
 // ----- 接口合规性编译检查 -----
 
 var (

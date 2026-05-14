@@ -73,6 +73,37 @@ Solana 由于其交易排序机制（Leader Schedule + Priority Fee），形成�
 取第一个成功的结果（BaseTxSender 已实现此逻辑）
 ```
 
+### BribeServiceManager 健康管理
+
+并行广播模式下，需要对各服务的健康状态进行管理（对比 `01-rpc-client` 的 `StableClient`）：
+
+| 维度 | StableClient（RPC） | BribeServiceManager（贿赂服务） |
+|------|---------------------|-------------------------------|
+| 发送模式 | 顺序故障转移（A→B→C） | 并行广播（A+B+C 同时发） |
+| 设计目标 | 节省资源，一个成功即可 | 最快上链，多发不会重复 |
+| 去重机制 | 不需要 | Solana 按交易签名去重 |
+
+错误处理策略：
+
+```
+                  健康追踪
+                     |
+    服务连续失败 N 次 → 标记为不健康
+                     |
+         并行广播时跳过不健康服务
+                     |
+    冷却期结束 → 纳入下次广播探测恢复
+                     |
+    探测成功 → 恢复健康    探测失败 → 继续冷却
+                     |
+    所有服务不可用 → 触发 onAllDown 告警回调
+```
+
+配置参数：
+- `MaxConsecutiveFails`：连续失败阈值（默认 3 次），达到后标记不健康
+- `CooldownDuration`：冷却时间（默认 30s），过后自动探测恢复
+- `SendTimeout`：单次发送超时（默认 5s）
+
 ## EVM Anti-MEV
 
 EVM 链上的 MEV 防护主要依赖私有交易池（Private Transaction Pool），交易不进入公开 mempool，攻击者无法观测到：
@@ -116,7 +147,7 @@ RBF（Replace-By-Fee）：用更高的 Gas 重新发送同 nonce 的交易，替
     notes.md                   -- 深度技术笔记
     demo/
         sandwich.go            -- 三明治攻击模拟器
-        bribe_service.go       -- 贿赂服务实现（mock）
+        bribe_service.go       -- 贿赂服务实现（mock）+ BribeServiceManager 健康管理
         priority_fee.go        -- 优先费推荐算法
         rbf.go                 -- RBF 加速逻辑
         main.go                -- 可运行演示

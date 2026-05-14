@@ -463,6 +463,218 @@ func TestRBF_AccelerateResult(t *testing.T) {
 	}
 }
 
+// ----- BribeServiceManager 健康管理测试 -----
+
+func TestBribeServiceManager_AllHealthySend(t *testing.T) {
+	// 所有服务健康，并行发送应该成功
+	svc1 := NewNextBlockService()
+	svc2 := NewTemporalService()
+	svc1.SetFailRate(0)
+	svc2.SetFailRate(0)
+
+	mgr := NewBribeServiceManager(
+		[]dexwallet.BribeService{svc1, svc2},
+		DefaultBribeManagerConfig(),
+		nil,
+	)
+
+	ctx := context.Background()
+	txData := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}
+
+	hash, err := mgr.Send(ctx, txData, big.NewInt(10000))
+	if err != nil {
+		t.Fatalf("发送失败: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("应该返回有效哈希")
+	}
+
+	if mgr.HealthyCount() != 2 {
+		t.Errorf("应有 2 个健康服务: got %d", mgr.HealthyCount())
+	}
+}
+
+func TestBribeServiceManager_UnhealthySkip(t *testing.T) {
+	// 一个服务 100% 失败，连续失败后应被标记为不健康
+	svc1 := NewNextBlockService()
+	svc2 := NewTemporalService()
+	svc1.SetFailRate(1.0) // 总是失败
+	svc1.SetLatency(0)
+	svc2.SetFailRate(0) // 总是成功
+	svc2.SetLatency(0)
+
+	config := BribeServiceManagerConfig{
+		MaxConsecutiveFails: 2,
+		CooldownDuration:   1 * time.Hour, // 很长的冷却期
+		SendTimeout:        5 * time.Second,
+	}
+
+	mgr := NewBribeServiceManager(
+		[]dexwallet.BribeService{svc1, svc2},
+		config,
+		nil,
+	)
+
+	ctx := context.Background()
+	txData := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}
+
+	// 发送 2 次，svc1 连续失败 2 次 >= MaxConsecutiveFails
+	for i := 0; i < 2; i++ {
+		hash, err := mgr.Send(ctx, txData, nil)
+		if err != nil {
+			t.Fatalf("第 %d 次发送应成功（svc2 正常）: %v", i+1, err)
+		}
+		if hash == "" {
+			t.Fatalf("第 %d 次应返回有效哈希", i+1)
+		}
+	}
+
+	// svc1 应该被标记为不健康
+	if mgr.HealthyCount() != 1 {
+		t.Errorf("应有 1 个健康服务: got %d", mgr.HealthyCount())
+	}
+
+	stats := mgr.Stats()
+	for _, s := range stats {
+		if s.Name == "nextblock" && s.Healthy {
+			t.Error("nextblock 应该被标记为不健康")
+		}
+		if s.Name == "temporal" && !s.Healthy {
+			t.Error("temporal 应该保持健康")
+		}
+	}
+}
+
+func TestBribeServiceManager_CooldownRecovery(t *testing.T) {
+	svc1 := NewNextBlockService()
+	svc1.SetFailRate(1.0) // 先失败
+	svc1.SetLatency(0)
+
+	config := BribeServiceManagerConfig{
+		MaxConsecutiveFails: 1, // 失败 1 次就标记不健康
+		CooldownDuration:   50 * time.Millisecond,
+		SendTimeout:        5 * time.Second,
+	}
+
+	mgr := NewBribeServiceManager(
+		[]dexwallet.BribeService{svc1},
+		config,
+		nil,
+	)
+
+	ctx := context.Background()
+	txData := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}
+
+	// 第一次发送失败，标记为不健康
+	_, err := mgr.Send(ctx, txData, nil)
+	if err == nil {
+		t.Fatal("应该失败")
+	}
+	if mgr.HealthyCount() != 0 {
+		t.Fatal("应有 0 个健康服务")
+	}
+
+	// 冷却期内，无可用服务
+	_, err = mgr.Send(ctx, txData, nil)
+	if err == nil {
+		t.Fatal("冷却期内应该返回无可用服务错误")
+	}
+
+	// 等待冷却期过去
+	time.Sleep(60 * time.Millisecond)
+
+	// 恢复服务
+	svc1.SetFailRate(0)
+
+	// 冷却期后，应该重新尝试并恢复
+	hash, err := mgr.Send(ctx, txData, nil)
+	if err != nil {
+		t.Fatalf("冷却期后恢复应成功: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("应返回有效哈希")
+	}
+	if mgr.HealthyCount() != 1 {
+		t.Errorf("恢复后应有 1 个健康服务: got %d", mgr.HealthyCount())
+	}
+}
+
+func TestBribeServiceManager_AllDownAlert(t *testing.T) {
+	svc1 := NewNextBlockService()
+	svc2 := NewTemporalService()
+	svc1.SetFailRate(1.0)
+	svc1.SetLatency(0)
+	svc2.SetFailRate(1.0)
+	svc2.SetLatency(0)
+
+	config := BribeServiceManagerConfig{
+		MaxConsecutiveFails: 1,
+		CooldownDuration:   1 * time.Hour,
+		SendTimeout:        5 * time.Second,
+	}
+
+	alertFired := false
+	mgr := NewBribeServiceManager(
+		[]dexwallet.BribeService{svc1, svc2},
+		config,
+		func() { alertFired = true },
+	)
+
+	ctx := context.Background()
+	txData := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}
+
+	// 所有服务失败
+	_, err := mgr.Send(ctx, txData, nil)
+	if err == nil {
+		t.Fatal("应该失败")
+	}
+
+	if !alertFired {
+		t.Error("所有服务不可用时应触发告警回调")
+	}
+}
+
+func TestBribeServiceManager_Stats(t *testing.T) {
+	svc1 := NewNextBlockService()
+	svc2 := NewTemporalService()
+	svc1.SetFailRate(0)
+	svc1.SetLatency(0)
+	svc2.SetFailRate(0)
+	svc2.SetLatency(0)
+
+	mgr := NewBribeServiceManager(
+		[]dexwallet.BribeService{svc1, svc2},
+		DefaultBribeManagerConfig(),
+		nil,
+	)
+
+	ctx := context.Background()
+	txData := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}
+
+	// 发送 3 次
+	for i := 0; i < 3; i++ {
+		mgr.Send(ctx, txData, nil)
+	}
+
+	stats := mgr.Stats()
+	if len(stats) != 2 {
+		t.Fatalf("应有 2 个服务统计: got %d", len(stats))
+	}
+
+	totalSuccess := int64(0)
+	for _, s := range stats {
+		totalSuccess += s.SuccessCount
+	}
+	// 3 次发送，每次 2 个服务都成功 = 6 次成功
+	if totalSuccess != 6 {
+		t.Errorf("总成功次数应为 6: got %d", totalSuccess)
+	}
+
+	if mgr.TotalCount() != 2 {
+		t.Errorf("总服务数应为 2: got %d", mgr.TotalCount())
+	}
+}
+
 // ----- 辅助函数 -----
 
 func TestBuildAndExtractMockTx(t *testing.T) {
