@@ -1,0 +1,10 @@
+# Compiled binaries (root level only)
+/demo
+/simulate
+*.exe
+
+# IDE
+.idea/
+
+# OS
+.DS_Store
