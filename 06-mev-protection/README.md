@@ -2,7 +2,9 @@
 
 ## 模块概述
 
-本模块聚焦链上交易中的 MEV（Maximal Extractable Value）攻击防护和交易发送优化。MEV 是验证者/搜索者通过重排、插入或审查交易来提取的额外价值，对普通用户构成直接经济损失。本模块通过三明治攻击模拟、贿赂服务多通道发送、优先费推荐和 RBF 加速四个维度，展示 MEV 防护的核心思路。
+本模块聚焦链上交易中的 MEV（Maximal Extractable Value）攻击防护和交易发送优化。MEV 是验证者/搜索者通过重排、插入或审查交易来提取的额外价值，对普通用户构成直接经济损失。本模块通过三明治攻击模拟、Solana 贿赂服务多通道发送、EVM Anti-MEV RPC、优先费推荐和 RBF 加速等维度，展示 MEV 防护的核心思路。
+
+> **重要区分**：贿赂服务（Bribe Service）是 **Solana 独有** 的机制，通过向 Leader 节点支付 Tip 获得优先打包权。EVM 链没有贿赂机制，而是使用 Anti-MEV RPC（如 Flashbots Protect）将交易发送到私有 mempool 防止被攻击者监听。
 
 ## MEV 攻击类型
 

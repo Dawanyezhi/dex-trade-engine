@@ -24,7 +24,7 @@ func main() {
 		{"场景 03：Swap 交易引擎", "工厂模式选 DEX / Solana 指令组装 / EVM ABI 编码 / 交易模拟", runScenario03},
 		{"场景 04：池子管理", "LRU 缓存 / 最优池选择 / 状态更新", runScenario04},
 		{"场景 05：聚合路由", "并发报价 / 优先级排序 / 降级兜底 / 两跳路由", runScenario05},
-		{"场景 06：MEV 防护", "三明治攻击模拟 / 贿赂服务 / 优先费推荐", runScenario06},
+		{"场景 06：MEV 防护", "三明治攻击模拟 / Solana 贿赂服务 / EVM Anti-MEV / 优先费推荐", runScenario06},
 		{"场景 07：事件解析", "解析器注册 / Swap 事件解析 / Syncer 主循环", runScenario07},
 		{"场景 08：生产级架构", "限流 / 多链配置 / 监控告警", runScenario08},
 	}

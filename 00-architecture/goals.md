@@ -31,7 +31,7 @@
 4. **构建交易**：工厂模式选择 SwapBuilder，链特定的交易构建
 5. **模拟执行**：Solana simulateTransaction / EVM eth_estimateGas，检查滑点
 6. **签名**：本地签名（demo）或远程 MPC 签名（生产）
-7. **多通道发送**：RPC 标准通道 + 贿赂服务通道并发发送，取第一个成功
+7. **多通道发送**：RPC 标准通道 + 加速通道（Solana: 贿赂服务 / EVM: Anti-MEV RPC）并发发送，取第一个成功
 8. **等待确认**：轮询交易状态，超时则标记 timeout
 
 **白板画法**：画序列图，左边 Wallet，右边链上节点，中间标注每步操作
@@ -74,7 +74,7 @@ Low:    第三方聚合器（1Inch, ParaSwap, OKX DEX）
 | PoolManager | dexwallet 定义+通用实现 | 池子管理与缓存 | `GetBestPool / UpdatePool / RefreshCache` |
 | Aggregator | dexwallet 通用实现 | 多 DEX 聚合选优 | `FindBestQuote / BuildSwap` |
 | EventParser | dexwallet 定义，链特定实现 | 链上事件解析 | `Parse(ctx, rawTx) -> []ChainEvent` |
-| BribeService | dexwallet 定义，链特定实现 | 贿赂/优先费服务 | `Send / GetRecommendedFee` |
+| BribeService | dexwallet 定义，链特定实现 | 交易加速（Solana 贿赂服务 / EVM Anti-MEV RPC） | `Send / GetRecommendedFee` |
 | TxSender | dexwallet 定义+通用实现 | 交易发送与确认 | `Send / Confirm / Retry` |
 | RPCClient | dexwallet 定义，链特定实现 | 链 RPC 客户端 | `SendTransaction / GetBalance / GetBlockHeight` |
 | Repository | dexwallet 定义 | 数据持久化 | `SaveTxRecord / GetPool / UpdateTxStatus` |

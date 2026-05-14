@@ -20,7 +20,7 @@ Onchain-DEX-Lab
 |   并发报价 / 优先级排序 / 降级兜底 / 两跳路由 / 灰度发布
 |
 +-- [核心亮点 3] MEV 防护与交易优化 (06-mev-protection)
-|   三明治攻击模拟 / 贿赂服务抽象 / 优先费推荐 / RBF 加速
+|   三明治攻击模拟 / Solana 贿赂服务 / EVM Anti-MEV / 优先费推荐 / RBF 加速
 |
 +-- [架构灵魂] 三层代码抽象 (internal/dexwallet)
     对标生产 irwallet 框架，从具体实现中提取跨链通用逻辑
@@ -28,7 +28,7 @@ Onchain-DEX-Lab
     +-----------------------------------------+
     |       dexwallet 通用层 (irwallet)        |   接口定义 + 通用实现
     |  SwapBuilder / Aggregator / PoolManager  |   Solana 和 EVM 共享
-    |  EventParser / BribeService / TxSender   |
+    |  EventParser / TxSender                  |
     +-----------------------------------------+
                       |
           +-----------+-----------+
@@ -76,7 +76,7 @@ Onchain-DEX-Lab
   [PASS] (0.05 s)
 
 [场景 06：MEV 防护]
-  三明治攻击模拟 / 贿赂服务 / 优先费推荐
+  三明治攻击模拟 / Solana 贿赂服务 / EVM Anti-MEV / 优先费推荐
   [PASS] (0.02 s)
 
 [场景 07：事件解析]
@@ -104,7 +104,7 @@ Onchain-DEX-Lab
 | 03-swap-engine | Demo | ~12 | 否 -- 本地签名替代 MPC |
 | 04-pool-management | Demo | ~8 | 否 -- 缺链上解析 |
 | 05-aggregator-routing | Demo | ~10 | 否 -- mock 报价数据 |
-| 06-mev-protection | Demo | ~8 | 否 -- mock 贿赂服务 |
+| 06-mev-protection | Demo | ~8 | 否 -- mock Solana 贿赂服务 / EVM Anti-MEV |
 | 07-event-parsing | Demo | ~8 | 否 -- 仅解析 3 种事件 |
 | 08-production-architecture | Demo | ~8 | 否 -- 缺中间件集成 |
 | internal/dexwallet | 核心库 | ~15 | 设计可复用 |
@@ -219,7 +219,7 @@ flowchart TB
 |    PoolManager      -- 池子管理与缓存                              |
 |    Aggregator       -- 多 DEX 聚合与路由                           |
 |    EventParser      -- 链上事件解析                                |
-|    BribeService     -- 贿赂/优先费服务                             |
+|    BribeService     -- 交易加速服务（Solana 贿赂 / EVM Anti-MEV）  |
 |    TxSender         -- 交易发送与确认                              |
 |    Alarm            -- 监控告警                                    |
 |                                                                    |
@@ -255,7 +255,7 @@ flowchart TB
 | [03-swap-engine](./03-swap-engine/) | 交易构建、工厂模式 | SwapBuilder 接口 + 6 个实现 | Solana vs EVM 构建流程对比 |
 | [04-pool-management](./04-pool-management/) | 池子缓存、最优池选择 | LRU 缓存 + 交易对索引 | 缓存策略与失效机制 |
 | [05-aggregator-routing](./05-aggregator-routing/) | 并发报价、聚合路由 | BaseAggregator 通用聚合 | 优先级策略与灰度发布 |
-| [06-mev-protection](./06-mev-protection/) | MEV 攻击、贿赂服务 | 三明治攻击模拟 | 5 个 Solana 贿赂服务商对比 |
+| [06-mev-protection](./06-mev-protection/) | MEV 防护（Solana 贿赂 / EVM Anti-MEV） | 三明治攻击模拟 | 5 个 Solana 贿赂服务商对比 |
 | [07-event-parsing](./07-event-parsing/) | 事件解析、Syncer 同步 | 解析器注册机制 | Solana 指令 vs EVM 事件日志 |
 | [08-production-architecture](./08-production-architecture/) | 限流、监控、多链扩展 | 令牌桶限流器 | 生产级运维清单 |
 | [interview-prep](./interview-prep/) | 面试 Q&A、场景题 | - | 口语化回答模板 |
@@ -448,7 +448,7 @@ make clean      # 清理缓存
 | 签名 | 本地 Ed25519 / ECDSA | 远程 MPC 签名（ksrv，TLS 双向认证） |
 | 数据存储 | 内存 map | MySQL + Redis + Kafka |
 | 池子数据 | 静态 mock | 链上实时解析 + gRPC 推送 |
-| 贿赂服务 | mock 接口 | 5 个服务商真实集成 |
+| 贿赂服务（Solana 独有） | mock 接口 | 5 个服务商真实集成（EVM 无贿赂，用 Anti-MEV RPC） |
 | 事件解析 | 3 种 | 70+ 种（74 个解析文件） |
 | 部署 | 本地运行 | K8s + Docker + 多环境 |
 | 监控 | 控制台输出 | 钉钉 / Lark + 7 个监控指标 |

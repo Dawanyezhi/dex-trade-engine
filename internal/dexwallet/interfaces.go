@@ -89,14 +89,17 @@ type EventParser interface {
 // EventHandler 事件处理函数。
 type EventHandler func(ctx context.Context, rawData []byte) (*ChainEvent, error)
 
-// BribeService 贿赂/优先费服务接口。
-// Solana 有 5 个贿赂服务商（NextBlock/Temporal/ZeroSlot 等），
-// EVM 使用 Anti-MEV RPC + RBF。
+// BribeService 交易加速服务接口。
+// 注意：贿赂服务是 Solana 独有的概念（5 个服务商：NextBlock/Temporal/ZeroSlot/BlockRazor/BlockRush），
+// EVM 没有贿赂机制，而是使用 Anti-MEV RPC（Flashbots Protect 等私有 mempool）+ RBF 加速。
+// 两者虽然都实现此接口，但底层机制完全不同：
+//   - Solana 贿赂服务：向 Leader 节点支付 Tip 获得优先打包权
+//   - EVM Anti-MEV RPC：将交易发送到私有 mempool 避免被三明治攻击，无需额外费用
 type BribeService interface {
-	// Send 通过贿赂服务发送交易。
+	// Send 通过加速服务发送交易（Solana: 贿赂服务 / EVM: Anti-MEV RPC）。
 	Send(ctx context.Context, txData []byte, fee *big.Int) (string, error)
 
-	// GetRecommendedFee 获取推荐的优先费/贿赂费。
+	// GetRecommendedFee 获取推荐费用（Solana: 贿赂费 / EVM: 返回 0，Anti-MEV 免费）。
 	GetRecommendedFee(ctx context.Context) (*big.Int, error)
 
 	// Name 服务商名称。

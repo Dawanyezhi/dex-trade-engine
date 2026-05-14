@@ -49,7 +49,7 @@ graph TB
     subgraph "多链节点"
         SOL_RPC["Solana RPC<br/>（多节点 + gRPC LaserStream）"]
         EVM_RPC["EVM RPC<br/>（多节点 + Anti-MEV）"]
-        BRIBE["贿赂服务<br/>（NextBlock / Temporal / ZeroSlot）"]
+        BRIBE["Solana 贿赂服务<br/>（NextBlock / Temporal / ZeroSlot）<br/>⚠️ Solana 独有，EVM 无此机制"]
     end
 
     API --> MQ_IN --> W_API
@@ -93,7 +93,7 @@ graph TB
 |                                                                      |
 |  接口定义:                                                           |
 |    SwapBuilder / PoolManager / Aggregator / EventParser              |
-|    BribeService / TxSender / RPCClient / Syncer / Repository         |
+|    BribeService（Solana 贿赂/EVM Anti-MEV） / TxSender / RPCClient / Syncer / Repository |
 |                                                                      |
 |  通用实现:                                                           |
 |    BaseAggregator    — 并发 Quote + 优先级排序 + 降级兜底             |
@@ -171,7 +171,7 @@ sequenceDiagram
     Wallet->>TX: Send(SignedTx)
     par 并发发送
         TX->>Chain: RPC 标准发送
-        TX->>Chain: 贿赂服务发送
+        TX->>Chain: Solana: 贿赂服务发送 / EVM: Anti-MEV RPC 发送
     end
     TX-->>Wallet: TxHash
 
