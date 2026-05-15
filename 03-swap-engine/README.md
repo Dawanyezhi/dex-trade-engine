@@ -109,9 +109,13 @@ SwapRequest
         factory.go             -- SwapBuilder 工厂注册机制
         solana_builders.go     -- 3 个 Solana DEX Builder（mock）
         evm_builders.go        -- 3 个 EVM DEX Builder（mock）
+        evm_approve.go         -- EVM ERC20 Approve 检查与交易构建（allowance 检查、approve(0) 边界）
         simulator.go           -- 交易模拟器
+        precheck.go            -- 交易前检查器（余额、滑点、参数验证）
+        preflight.go           -- Swap 预检验链（8 项检查 + RejectCode 拒绝码）
         main.go                -- 可运行演示
         swap_test.go           -- 测试
+        precheck_test.go       -- PreCheck 测试
 ```
 
 ## 与生产系统的差距

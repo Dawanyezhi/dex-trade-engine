@@ -53,6 +53,13 @@ func main() {
 	fmt.Println("场景 4: RBF 交易加速")
 	fmt.Println("============================================================")
 	demoRBFAcceleration()
+
+	// ===== 场景 5: EVM Gas Oracle =====
+	fmt.Println()
+	fmt.Println("============================================================")
+	fmt.Println("场景 5: EVM Gas Oracle (Gas 预测)")
+	fmt.Println("============================================================")
+	demoGasOracle()
 }
 
 // demoSandwichAttack 演示三明治攻击模拟。
@@ -529,4 +536,108 @@ func printMEVTableHeader(cols ...string) {
 // printMEVTableFooter 打印表格尾。
 func printMEVTableFooter() {
 	fmt.Println(strings.Repeat("-", 100))
+}
+
+// demoGasOracle 演示 EVM Gas 预测：UpdateBlock → EstimateBaseFee → RecommendPriorityFee → Trend。
+func demoGasOracle() {
+	oracle := NewGasOracle(20)
+
+	fmt.Println("\n--- 初始化 GasOracle（历史窗口=20 个区块）---")
+
+	// ---- 阶段 1: 注入稳定期区块数据 ----
+	fmt.Println("\n--- 阶段 1: 注入稳定期区块数据（baseFee 约 30 Gwei）---")
+	stableBaseFees := []uint64{
+		30_000000000, 30_500000000, 29_800000000, 30_200000000, 30_100000000,
+		29_900000000, 30_300000000, 30_000000000, 29_700000000, 30_400000000,
+	}
+	stableTips := []uint64{
+		1_000000000, 1_500000000, 2_000000000, 1_200000000, 1_800000000,
+	}
+
+	for i, baseFee := range stableBaseFees {
+		blockNum := uint64(18000000 + i)
+		oracle.UpdateBlock(blockNum, baseFee, stableTips)
+	}
+
+	trend := oracle.Trend()
+	estimatedBase := oracle.EstimateBaseFee()
+	fmt.Printf("\n  当前趋势:     %s\n", trend)
+	fmt.Printf("  当前 baseFee: %d wei (%.1f Gwei)\n",
+		stableBaseFees[len(stableBaseFees)-1],
+		float64(stableBaseFees[len(stableBaseFees)-1])/1e9)
+	fmt.Printf("  预测 baseFee: %d wei (%.1f Gwei)\n", estimatedBase, float64(estimatedBase)/1e9)
+
+	// 推荐 priorityFee
+	fmt.Println("\n  PriorityFee 推荐:")
+	for _, level := range []string{"low", "medium", "high"} {
+		tip := oracle.RecommendPriorityFee(level)
+		fmt.Printf("    %-8s: %d wei (%.1f Gwei)\n", level, tip, float64(tip)/1e9)
+	}
+
+	// 推荐 maxFeePerGas
+	fmt.Println("\n  MaxFeePerGas 推荐 (= estimatedBaseFee*2 + tip):")
+	for _, level := range []string{"low", "medium", "high"} {
+		maxFee := oracle.RecommendMaxFee(level)
+		fmt.Printf("    %-8s: %d wei (%.1f Gwei)\n", level, maxFee, float64(maxFee)/1e9)
+	}
+
+	// Gas 费用估算
+	fmt.Println("\n  Swap 交易 Gas 费用估算 (gasLimit=200000):")
+	for _, level := range []string{"low", "medium", "high"} {
+		cost := oracle.EstimateGasCost(200000, level)
+		costETH := float64(cost) / 1e18
+		fmt.Printf("    %-8s: %d wei (%.6f ETH)\n", level, cost, costETH)
+	}
+
+	// ---- 阶段 2: 注入上升期区块数据（模拟网络拥堵）----
+	fmt.Println("\n--- 阶段 2: 注入上升期区块数据（模拟网络拥堵）---")
+	risingBaseFees := []uint64{
+		32_000000000, 35_000000000, 38_000000000, 42_000000000, 46_000000000,
+		50_000000000, 55_000000000, 60_000000000, 65_000000000, 70_000000000,
+	}
+	congestionTips := []uint64{
+		3_000000000, 5_000000000, 8_000000000, 10_000000000, 15_000000000,
+	}
+
+	for i, baseFee := range risingBaseFees {
+		blockNum := uint64(18000010 + i)
+		oracle.UpdateBlock(blockNum, baseFee, congestionTips)
+	}
+
+	trend = oracle.Trend()
+	estimatedBase = oracle.EstimateBaseFee()
+	currentBase := risingBaseFees[len(risingBaseFees)-1]
+	fmt.Printf("\n  当前趋势:     %s\n", trend)
+	fmt.Printf("  当前 baseFee: %d wei (%.1f Gwei)\n", currentBase, float64(currentBase)/1e9)
+	fmt.Printf("  预测 baseFee: %d wei (%.1f Gwei) -- 上涨 12.5%%\n",
+		estimatedBase, float64(estimatedBase)/1e9)
+
+	// ---- 阶段 3: 注入下降期区块数据（网络恢复）----
+	fmt.Println("\n--- 阶段 3: 注入下降期区块数据（网络恢复）---")
+	fallingBaseFees := []uint64{
+		65_000000000, 58_000000000, 50_000000000, 44_000000000, 38_000000000,
+		33_000000000, 30_000000000, 28_000000000, 27_000000000, 26_000000000,
+	}
+
+	for i, baseFee := range fallingBaseFees {
+		blockNum := uint64(18000020 + i)
+		oracle.UpdateBlock(blockNum, baseFee, stableTips)
+	}
+
+	trend = oracle.Trend()
+	estimatedBase = oracle.EstimateBaseFee()
+	currentBase = fallingBaseFees[len(fallingBaseFees)-1]
+	fmt.Printf("\n  当前趋势:     %s\n", trend)
+	fmt.Printf("  当前 baseFee: %d wei (%.1f Gwei)\n", currentBase, float64(currentBase)/1e9)
+	fmt.Printf("  预测 baseFee: %d wei (%.1f Gwei) -- 下降 12.5%%\n",
+		estimatedBase, float64(estimatedBase)/1e9)
+
+	// ---- GasOracle 格式化输出 ----
+	fmt.Printf("\n  Oracle 状态: %s\n", oracle.String())
+
+	fmt.Println("\n结论:")
+	fmt.Println("- EVM baseFee 每个区块动态调整（最大涨跌 12.5%）")
+	fmt.Println("- GasOracle 根据历史趋势预测下一区块 baseFee")
+	fmt.Println("- 拥堵时预测值自动上调，恢复时自动下调")
+	fmt.Println("- maxFeePerGas = estimatedBase*2 + tip，留出安全余量")
 }

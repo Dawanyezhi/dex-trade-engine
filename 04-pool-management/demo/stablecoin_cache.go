@@ -417,6 +417,61 @@ func (c *TieredPoolCache) ClassifyPool(pool *dexwallet.Pool) string {
 	}
 }
 
+// CheckDepeg 检测稳定币是否脱锚。
+//
+// 判断逻辑：如果价格偏离锚定值（1.0 USD）超过阈值，则认为脱锚。
+// 参数:
+//   - price: 当前价格（相对于 1.0 USD）
+//   - thresholdBps: 允许的最大偏离（基点），例如 500 = 5%
+//
+// 返回 true 表示已脱锚（价格偏离超过阈值）。
+//
+// 使用场景：
+//   定期从预言机获取稳定币价格，检测是否脱锚。
+//   如果脱锚，应调用 InvalidateByMint 失效相关缓存，
+//   并从 StablecoinSet 中移除该稳定币，使后续池子归入 normalCache。
+func (c *TieredPoolCache) CheckDepeg(price float64, thresholdBps uint64) bool {
+	// 计算偏离度：|price - 1.0| / 1.0 * 10000（基点）
+	deviation := price - 1.0
+	if deviation < 0 {
+		deviation = -deviation
+	}
+	deviationBps := uint64(deviation * 10000)
+	return deviationBps > thresholdBps
+}
+
+// InvalidateByMint 批量失效包含指定 mint 地址的所有缓存条目。
+//
+// 使用场景：
+//   当检测到某个稳定币脱锚时，需要失效所有包含该 mint 的池子缓存，
+//   确保下次查询时从链上获取最新数据。
+//
+// 返回被失效的条目数量。
+func (c *TieredPoolCache) InvalidateByMint(mint string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	count := 0
+
+	// 扫描 stableCache
+	for addr, entry := range c.stableCache {
+		if entry.pool.BaseMint == mint || entry.pool.QuoteMint == mint {
+			delete(c.stableCache, addr)
+			count++
+		}
+	}
+
+	// 扫描 normalCache
+	for addr, entry := range c.normalCache {
+		if entry.pool.BaseMint == mint || entry.pool.QuoteMint == mint {
+			delete(c.normalCache, addr)
+			count++
+		}
+	}
+
+	return count
+}
+
 // classifyPoolLocked 内部分类方法（调用方须已持有 c.mu 锁）。
 // 直接访问 stablecoins 的底层 map 以避免重复加锁。
 func (c *TieredPoolCache) classifyPoolLocked(pool *dexwallet.Pool) PoolTier {

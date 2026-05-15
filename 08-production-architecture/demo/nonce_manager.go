@@ -230,6 +230,10 @@ func (nm *NonceManager) PeekNonce(address string) (uint64, error) {
 		return nonce, nil
 	}
 
-	// 已有缓存，直接返回（注意：不加锁，可能读到正在被修改的值）
-	return an.current, nil
+	// 加锁读取，避免与 AcquireNonce 的写操作产生 data race
+	an.mu.Lock()
+	nonce := an.current
+	an.mu.Unlock()
+	return nonce, nil
 }
+

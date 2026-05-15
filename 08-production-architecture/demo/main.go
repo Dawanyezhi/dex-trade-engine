@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,27 @@ func main() {
 
 	// 场景 4: 监控告警触发
 	demoMonitorAlarm()
+
+	fmt.Println()
+	fmt.Println("----------------------------------------")
+	fmt.Println()
+
+	// 场景 5: 交易状态机
+	demoTxStateMachine()
+
+	fmt.Println()
+	fmt.Println("----------------------------------------")
+	fmt.Println()
+
+	// 场景 6: 卡住交易检测
+	demoStuckTxDetector()
+
+	fmt.Println()
+	fmt.Println("----------------------------------------")
+	fmt.Println()
+
+	// 场景 7: Nonce 管理
+	demoNonceManager()
 }
 
 // demoTokenBucketRateLimiting 演示令牌桶限流。
@@ -384,4 +406,296 @@ func demoMonitorAlarm() {
 
 	fmt.Println()
 	fmt.Println("  监控服务已停止。")
+}
+
+// demoTxStateMachine 演示状态转换：New→Ready→Pending→Confirmed，非法转换被拒绝，RejectCode 使用。
+func demoTxStateMachine() {
+	fmt.Println("[场景 5] === 交易状态机 ===")
+	fmt.Println()
+
+	// ---- 1. 正常生命周期: New → Ready → Pending → Confirmed ----
+	fmt.Println("  [1] 正常生命周期: New → Ready → Pending → Confirmed")
+
+	record := &dexwallet.TxRecord{
+		TxHash:    "0xabc123def456",
+		ChainID:   coinset.ChainEthereum,
+		DexID:     dexwallet.DexUniswapV2,
+		Direction: dexwallet.SwapDirectionBuy,
+		Status:    dexwallet.TxStatusNew,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	sm := NewTxStateMachine(record)
+	fmt.Printf("      初始状态: %s\n", sm.Current())
+
+	transitions := []struct {
+		to     dexwallet.TxStatus
+		reason string
+	}{
+		{dexwallet.TxStatusReady, "交易构建完成"},
+		{dexwallet.TxStatusPending, "交易已广播到链上"},
+		{dexwallet.TxStatusConfirmed, "链上确认成功（区块 #18000001）"},
+	}
+
+	for _, t := range transitions {
+		err := sm.Transition(t.to, t.reason)
+		if err != nil {
+			fmt.Printf("      [错误] %v\n", err)
+		} else {
+			fmt.Printf("      转换成功: → %s（原因: %s）\n", sm.Current(), t.reason)
+		}
+	}
+
+	// ---- 2. 非法状态转换 ----
+	fmt.Println("\n  [2] 非法状态转换（应被拒绝）")
+
+	// Confirmed → Pending（已确认的交易不能回退到 Pending）
+	err := sm.Transition(dexwallet.TxStatusPending, "尝试回退")
+	if err != nil {
+		fmt.Printf("      Confirmed → Pending: [预期错误] %v\n", err)
+	}
+
+	// 创建新的状态机测试更多非法转换
+	record2 := &dexwallet.TxRecord{Status: dexwallet.TxStatusNew, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	sm2 := NewTxStateMachine(record2)
+
+	err = sm2.Transition(dexwallet.TxStatusPending, "跳过 Ready 直接到 Pending")
+	if err != nil {
+		fmt.Printf("      New → Pending:    [预期错误] %v\n", err)
+	}
+
+	err = sm2.Transition(dexwallet.TxStatusConfirmed, "跳过 Ready 和 Pending")
+	if err != nil {
+		fmt.Printf("      New → Confirmed:  [预期错误] %v\n", err)
+	}
+
+	// ---- 3. 状态变更历史 ----
+	fmt.Println("\n  [3] 状态变更历史（审计日志）")
+	history := sm.History()
+	for i, h := range history {
+		fmt.Printf("      [%d] %s → %s （原因: %s, 时间: %s）\n",
+			i+1, h.From, h.To, h.Reason, h.Timestamp.Format("15:04:05.000"))
+	}
+
+	// ---- 4. RejectCode 错误码体系 ----
+	fmt.Println("\n  [4] RejectCode 错误码体系")
+
+	codes := []RejectCode{
+		RejectOK,
+		RejectInvalidOrderID,
+		RejectInvalidAmount,
+		RejectSlippageOverflow,
+		RejectInvalidContract,
+		RejectInsufficientBalance,
+		RejectServerError,
+	}
+
+	fmt.Printf("      %-10s %-14s %-12s %s\n", "错误码", "分类", "是否成功", "描述")
+	fmt.Println("      " + fmt.Sprintf("%s", strings.Repeat("-", 55)))
+	for _, code := range codes {
+		fmt.Printf("      %-10d %-14s %-12v %s\n",
+			int(code), code.Category(), code.IsSuccess(), code.String())
+	}
+}
+
+// demoStuckTxDetector 演示 StuckTxDetector.ScanOnce 检测超时交易。
+func demoStuckTxDetector() {
+	fmt.Println("[场景 6] === 卡住交易检测（StuckTxDetector）===")
+	fmt.Println()
+
+	// 模拟交易记录存储
+	now := time.Now()
+	records := []*dexwallet.TxRecord{
+		{
+			TxHash:    "0xTx_Normal_001",
+			ChainID:   coinset.ChainEthereum,
+			Status:    dexwallet.TxStatusPending,
+			CreatedAt: now.Add(-30 * time.Second), // 30 秒前，未超时
+			UpdatedAt: now,
+		},
+		{
+			TxHash:    "0xTx_Timeout_002",
+			ChainID:   coinset.ChainEthereum,
+			Status:    dexwallet.TxStatusPending,
+			CreatedAt: now.Add(-3 * time.Minute), // 3 分钟前，超时
+			UpdatedAt: now,
+		},
+		{
+			TxHash:    "0xTx_Confirmed_003",
+			ChainID:   coinset.ChainEthereum,
+			Status:    dexwallet.TxStatusPending,
+			CreatedAt: now.Add(-2 * time.Minute),
+			UpdatedAt: now,
+		},
+		{
+			TxHash:    "0xTx_Failed_004",
+			ChainID:   coinset.ChainEthereum,
+			Status:    dexwallet.TxStatusPending,
+			CreatedAt: now.Add(-2 * time.Minute),
+			UpdatedAt: now,
+		},
+	}
+
+	// 模拟链上状态查询
+	onChainStatus := map[string]dexwallet.TxStatus{
+		"0xTx_Normal_001":    dexwallet.TxStatusPending,   // 仍在 pending
+		"0xTx_Timeout_002":   dexwallet.TxStatusPending,   // 仍在 pending（超时）
+		"0xTx_Confirmed_003": dexwallet.TxStatusConfirmed, // 已确认
+		"0xTx_Failed_004":    dexwallet.TxStatusFailed,    // 已失败
+	}
+
+	config := StuckTxConfig{
+		ScanInterval:     10 * time.Second,
+		PendingTimeout:   1 * time.Minute, // 1 分钟超时
+		MaxRetries:       3,
+		RBFGasMultiplier: 13000, // 1.3x
+	}
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return onChainStatus[txHash]
+		},
+		func() []*dexwallet.TxRecord {
+			return records
+		},
+		func(record *dexwallet.TxRecord) {
+			// 模拟更新存储
+		},
+	)
+
+	fmt.Printf("  配置: pendingTimeout=%v, maxRetries=%d, RBF=%.1fx\n",
+		config.PendingTimeout, config.MaxRetries, float64(config.RBFGasMultiplier)/10000.0)
+
+	fmt.Println("\n  Pending 交易列表:")
+	for _, r := range records {
+		elapsed := now.Sub(r.CreatedAt).Round(time.Second)
+		fmt.Printf("    %s: 已等待 %v\n", r.TxHash, elapsed)
+	}
+
+	// ---- 第一次扫描 ----
+	fmt.Println("\n  [扫描 1] 首次扫描:")
+	actions := detector.ScanOnce()
+	for _, a := range actions {
+		fmt.Printf("    %s → action=%s (%s)\n", a.TxHash, a.Action, a.Reason)
+	}
+
+	// ---- 第二次扫描（模拟重试后仍超时）----
+	fmt.Println("\n  [扫描 2] 第二次扫描（超时交易继续重试）:")
+	actions = detector.ScanOnce()
+	for _, a := range actions {
+		fmt.Printf("    %s → action=%s (%s)\n", a.TxHash, a.Action, a.Reason)
+	}
+	fmt.Printf("    0xTx_Timeout_002 重试次数: %d/%d\n",
+		detector.GetRetryCount("0xTx_Timeout_002"), config.MaxRetries)
+
+	// ---- 第三次和第四次扫描（达到最大重试次数）----
+	fmt.Println("\n  [扫描 3+4] 继续扫描直到重试耗尽:")
+	for i := 3; i <= 4; i++ {
+		actions = detector.ScanOnce()
+		for _, a := range actions {
+			fmt.Printf("    扫描 %d: %s → action=%s (%s)\n", i, a.TxHash, a.Action, a.Reason)
+		}
+	}
+
+	fmt.Println("\n  最终状态:")
+	for _, r := range records {
+		fmt.Printf("    %s: status=%s\n", r.TxHash, r.Status)
+	}
+}
+
+// demoNonceManager 演示 AcquireNonce/ResetNonce/PeekNonce。
+func demoNonceManager() {
+	fmt.Println("[场景 7] === EVM Nonce 管理 ===")
+	fmt.Println()
+
+	// 模拟链上 nonce 查询（初始 nonce = 42）
+	chainNonces := map[string]uint64{
+		"0xAlice": 42,
+		"0xBob":   100,
+	}
+
+	nm := NewNonceManager(func(address string) (uint64, error) {
+		nonce, ok := chainNonces[address]
+		if !ok {
+			return 0, fmt.Errorf("address not found: %s", address)
+		}
+		return nonce, nil
+	})
+
+	// ---- 1. 首次获取 nonce（从链上同步）----
+	fmt.Println("  [1] 首次获取 nonce（从链上同步）")
+
+	nonce1, release1, err := nm.AcquireNonce("0xAlice")
+	if err != nil {
+		fmt.Printf("      [错误] %v\n", err)
+		return
+	}
+	fmt.Printf("      Alice 首次获取: nonce=%d（从链上同步，链上值=42）\n", nonce1)
+	release1()
+
+	// ---- 2. 连续获取 nonce（本地递增）----
+	fmt.Println("\n  [2] 连续获取 nonce（本地递增，无 RPC 调用）")
+
+	for i := 0; i < 3; i++ {
+		nonce, release, err := nm.AcquireNonce("0xAlice")
+		if err != nil {
+			fmt.Printf("      [错误] %v\n", err)
+			continue
+		}
+		fmt.Printf("      第 %d 次获取: nonce=%d\n", i+2, nonce)
+		release()
+	}
+
+	// ---- 3. PeekNonce 查看当前值（不递增）----
+	fmt.Println("\n  [3] PeekNonce 查看当前值（不消耗、不递增）")
+
+	peeked, err := nm.PeekNonce("0xAlice")
+	if err != nil {
+		fmt.Printf("      [错误] %v\n", err)
+	} else {
+		fmt.Printf("      Alice 当前 nonce: %d（下一笔交易应使用此值）\n", peeked)
+	}
+
+	// 查看未知地址
+	peekedBob, err := nm.PeekNonce("0xBob")
+	if err != nil {
+		fmt.Printf("      [错误] %v\n", err)
+	} else {
+		fmt.Printf("      Bob 当前 nonce: %d（未使用过，直接查链上）\n", peekedBob)
+	}
+
+	// ---- 4. ResetNonce 重置（模拟 nonce gap 修复）----
+	fmt.Println("\n  [4] ResetNonce 重置（模拟 nonce gap 修复后重新同步）")
+
+	fmt.Printf("      重置前 Alice nonce: %d\n", peeked)
+	nm.ResetNonce("0xAlice")
+
+	// 模拟链上 nonce 已更新（之前发的交易已确认）
+	chainNonces["0xAlice"] = 46
+
+	nonce5, release5, err := nm.AcquireNonce("0xAlice")
+	if err != nil {
+		fmt.Printf("      [错误] %v\n", err)
+	} else {
+		fmt.Printf("      重置后重新获取: nonce=%d（从链上重新同步，链上值=46）\n", nonce5)
+		release5()
+	}
+
+	// ---- 5. 多地址独立管理 ----
+	fmt.Println("\n  [5] 多地址独立管理（Alice 和 Bob 互不影响）")
+
+	nonceAlice, releaseA, _ := nm.AcquireNonce("0xAlice")
+	nonceBob, releaseB, _ := nm.AcquireNonce("0xBob")
+	fmt.Printf("      Alice: nonce=%d\n", nonceAlice)
+	fmt.Printf("      Bob:   nonce=%d\n", nonceBob)
+	releaseA()
+	releaseB()
+
+	fmt.Println("\n  [总结]")
+	fmt.Println("    - 首次使用某地址时从链上同步 nonce，之后本地递增")
+	fmt.Println("    - 每个地址独立加锁，不同地址之间不互斥")
+	fmt.Println("    - ResetNonce 用于 nonce gap 修复后重新对齐")
+	fmt.Println("    - Solana 不需要 Nonce 管理（使用 recent blockhash 防重放）")
 }

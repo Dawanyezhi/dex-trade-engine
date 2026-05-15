@@ -46,6 +46,9 @@ func main() {
 	// ---- 演示 5: 缓存失效与回源 ----
 	demoCacheInvalidation(ctx, pm)
 
+	// ---- 演示 6: 稳定币分层缓存 ----
+	demoStablecoinCache()
+
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Println("演示完成")
 	fmt.Println(strings.Repeat("=", 70))
@@ -447,4 +450,152 @@ func printPool(p *dexwallet.Pool) {
 	fmt.Printf("    费率(BPS): %d\n", p.FeeRate)
 	fmt.Printf("    状态:     %s\n", p.State)
 	fmt.Printf("    更新时间: %s\n", p.UpdatedAt.Format(time.RFC3339))
+}
+
+// demoStablecoinCache 演示 TieredPoolCache 的三层 TTL、StablecoinSet 判断、脱锚检测。
+func demoStablecoinCache() {
+	fmt.Println("\n" + strings.Repeat("-", 70))
+	fmt.Println("演示 6: 稳定币分层缓存（TieredPoolCache）")
+	fmt.Println(strings.Repeat("-", 70))
+
+	// ---- 初始化稳定币集合和分层缓存 ----
+	stablecoins := DefaultStablecoinSet()
+	normalTTL := 500 * time.Millisecond  // 普通池 TTL（演示用，生产中 3-5 秒）
+	stableTTL := 2 * time.Second         // 稳定币池 TTL（演示用，生产中 30-60 秒）
+	cache := NewTieredPoolCache(stablecoins, normalTTL, stableTTL)
+
+	fmt.Printf("\n  缓存配置: normalTTL=%v, stableTTL=%v\n", normalTTL, stableTTL)
+
+	// ---- 1. StablecoinSet 判断 ----
+	fmt.Println("\n  [1] StablecoinSet 稳定币识别")
+
+	testMints := []struct {
+		mint   string
+		symbol string
+	}{
+		{"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "USDC(Solana)"},
+		{"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "USDT(Solana)"},
+		{"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC(ETH)"},
+		{"So11111111111111111111111111111111111111112", "SOL"},
+		{"MEMExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "MEME"},
+	}
+	for _, t := range testMints {
+		isStable := stablecoins.IsStablecoin(t.mint)
+		fmt.Printf("    %s: 是否稳定币 = %v\n", t.symbol, isStable)
+	}
+
+	// ---- 2. 三层 TTL 分类 ----
+	fmt.Println("\n  [2] 三层 TTL 分类")
+
+	pools := []*dexwallet.Pool{
+		{
+			Address:     "Pool_USDT_USDC_001",
+			DexID:       dexwallet.DexCurve,
+			ChainID:     coinset.ChainEthereum,
+			BaseMint:    "0xdAC17F958D2ee523a2206206994597C13D831ec7", // USDT
+			QuoteMint:   "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // USDC
+			BaseSymbol:  "USDT",
+			QuoteSymbol: "USDC",
+			Liquidity:   new(big.Int).Mul(big.NewInt(1000000), big.NewInt(1e6)),
+			FeeRate:     4,
+			State:       dexwallet.PoolStateActive,
+		},
+		{
+			Address:     "Pool_SOL_USDT_002",
+			DexID:       dexwallet.DexRaydiumAMM,
+			ChainID:     coinset.ChainSolana,
+			BaseMint:    "So11111111111111111111111111111111111111112",  // SOL
+			QuoteMint:   "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+			BaseSymbol:  "SOL",
+			QuoteSymbol: "USDT",
+			Liquidity:   new(big.Int).Mul(big.NewInt(50000), big.NewInt(1e9)),
+			FeeRate:     25,
+			State:       dexwallet.PoolStateActive,
+		},
+		{
+			Address:     "Pool_MEME_SOL_003",
+			DexID:       dexwallet.DexRaydiumAMM,
+			ChainID:     coinset.ChainSolana,
+			BaseMint:    "MEMExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", // MEME
+			QuoteMint:   "So11111111111111111111111111111111111111112",  // SOL
+			BaseSymbol:  "MEME",
+			QuoteSymbol: "SOL",
+			Liquidity:   new(big.Int).Mul(big.NewInt(100), big.NewInt(1e9)),
+			FeeRate:     25,
+			State:       dexwallet.PoolStateActive,
+		},
+	}
+
+	fmt.Printf("    %-25s %-12s %-16s %-10s\n", "池子地址", "交易对", "缓存层级", "TTL")
+	fmt.Println("    " + strings.Repeat("-", 65))
+	for _, p := range pools {
+		tier := cache.ClassifyPool(p)
+		ttl := normalTTL
+		if tier == string(PoolTierStableStable) || tier == string(PoolTierStableNormal) {
+			ttl = stableTTL
+		}
+		fmt.Printf("    %-25s %-12s %-16s %-10v\n",
+			p.Address, p.BaseSymbol+"/"+p.QuoteSymbol, tier, ttl)
+		cache.Put(p)
+	}
+
+	// ---- 3. 缓存命中与过期 ----
+	fmt.Println("\n  [3] 缓存命中与过期")
+
+	// 立即查询：全部命中
+	for _, p := range pools {
+		_, hit := cache.Get(p.Address)
+		fmt.Printf("    %s: 缓存命中 = %v\n", p.Address, hit)
+	}
+
+	stats := cache.Stats()
+	fmt.Printf("    统计: normalSize=%d, stableSize=%d, 命中率=%.1f%%\n",
+		stats.NormalSize, stats.StableSize, stats.HitRate*100)
+
+	// 等待 normalTTL 过期（600ms > 500ms），但 stableTTL 仍有效
+	fmt.Printf("\n    等待 %v（超过 normalTTL=%v，但在 stableTTL=%v 内）...\n",
+		600*time.Millisecond, normalTTL, stableTTL)
+	time.Sleep(600 * time.Millisecond)
+
+	for _, p := range pools {
+		_, hit := cache.Get(p.Address)
+		tier := cache.ClassifyPool(p)
+		fmt.Printf("    %s (%s): 缓存命中 = %v\n", p.Address, tier, hit)
+	}
+
+	// ---- 4. 脱锚检测（通过 Invalidate 模拟） ----
+	fmt.Println("\n  [4] 稳定币脱锚检测（模拟 USDT 脱锚）")
+
+	// 先重新写入所有池子
+	for _, p := range pools {
+		cache.Put(p)
+	}
+
+	// 检查脱锚前：USDT/USDC 池缓存存在
+	_, hitBefore := cache.Get("Pool_USDT_USDC_001")
+	fmt.Printf("    脱锚前: USDT/USDC 池缓存命中 = %v\n", hitBefore)
+
+	// 模拟 USDT 脱锚：手动失效相关池子的缓存
+	fmt.Println("    检测到 USDT 价格跌破 0.95 USD，触发脱锚处理：")
+	fmt.Println("      - Invalidate USDT/USDC 池缓存")
+	fmt.Println("      - Invalidate SOL/USDT 池缓存")
+	cache.Invalidate("Pool_USDT_USDC_001")
+	cache.Invalidate("Pool_SOL_USDT_002")
+
+	_, hitAfter := cache.Get("Pool_USDT_USDC_001")
+	_, hitSOL := cache.Get("Pool_SOL_USDT_002")
+	_, hitMEME := cache.Get("Pool_MEME_SOL_003")
+	fmt.Printf("    脱锚后: USDT/USDC 池缓存命中 = %v\n", hitAfter)
+	fmt.Printf("    脱锚后: SOL/USDT 池缓存命中 = %v\n", hitSOL)
+	fmt.Printf("    脱锚后: MEME/SOL 池缓存命中 = %v（不受影响）\n", hitMEME)
+
+	statsFinal := cache.Stats()
+	fmt.Printf("    最终统计: normalSize=%d, stableSize=%d, 总命中=%d, 总未命中=%d\n",
+		statsFinal.NormalSize, statsFinal.StableSize, statsFinal.TotalHits, statsFinal.TotalMisses)
+
+	fmt.Println("\n  [总结]")
+	fmt.Println("    - stable-stable 池（如 USDT/USDC）使用最长 TTL，减少 RPC 调用")
+	fmt.Println("    - stable-normal 池（如 SOL/USDT）使用中等 TTL")
+	fmt.Println("    - normal-normal 池（如 MEME/SOL）使用最短 TTL，保证数据新鲜度")
+	fmt.Println("    - 脱锚时通过 Invalidate 强制失效缓存，下次查询从链上刷新")
 }

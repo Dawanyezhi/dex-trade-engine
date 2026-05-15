@@ -149,6 +149,7 @@ RBF（Replace-By-Fee）：用更高的 Gas 重新发送同 nonce 的交易，替
         sandwich.go            -- 三明治攻击模拟器
         bribe_service.go       -- 贿赂服务实现（mock）+ BribeServiceManager 健康管理
         priority_fee.go        -- 优先费推荐算法
+        gas_oracle.go          -- EVM Gas Oracle（EIP-1559 baseFee 预测 + 百分位 tip 推荐）
         rbf.go                 -- RBF 加速逻辑
         main.go                -- 可运行演示
         mev_test.go            -- 测试

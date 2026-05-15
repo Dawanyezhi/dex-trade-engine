@@ -154,8 +154,13 @@ type DexEntry struct {
         mock_protocol.go           -- Mock DEX 协议和 SwapBuilder 实现
         mock_pool_manager.go       -- Mock PoolManager 实现
         two_hop_router.go          -- 两跳路由器
+        priority_selector.go       -- 优先级竞争选择器（高/中/低三层降级）
+        dex_competition.go         -- 多 DEX 并发竞争（三层优先级状态机 + SplitMix64 灰度 + fast-fail）
+        dex_error_collector.go     -- DEX 错误收集与分析（优先级分组 + 业务错误优先）
+        clmm_quote.go              -- CLMM 跨 tick 报价 + Bonding Curve 毕业检测
         main.go                    -- 可运行演示（5 个场景）
         aggregator_test.go         -- 测试
+        priority_selector_test.go  -- PrioritySelector 测试
 ```
 
 ## 与生产系统的差距

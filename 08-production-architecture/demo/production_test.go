@@ -846,3 +846,1052 @@ func BenchmarkWorkerPoolSubmit(b *testing.B) {
 		_ = pool.Submit(ctx, func() {})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// StuckTxDetector 卡住交易检测测试
+// ---------------------------------------------------------------------------
+
+// TestStuckTxDetector_NoPendingTx 测试无 pending 交易时 ScanOnce 无输出。
+func TestStuckTxDetector_NoPendingTx(t *testing.T) {
+	config := DefaultStuckTxConfig()
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusPending
+		},
+		func() []*dexwallet.TxRecord {
+			return nil // 无 pending 记录
+		},
+		func(record *dexwallet.TxRecord) {},
+	)
+
+	actions := detector.ScanOnce()
+	if len(actions) != 0 {
+		t.Errorf("无 pending 交易时 ScanOnce 应返回空列表，实际=%d", len(actions))
+	}
+}
+
+// TestStuckTxDetector_NoPendingTx_EmptySlice 测试空列表的情况。
+func TestStuckTxDetector_NoPendingTx_EmptySlice(t *testing.T) {
+	config := DefaultStuckTxConfig()
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusPending
+		},
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{} // 空列表
+		},
+		func(record *dexwallet.TxRecord) {},
+	)
+
+	actions := detector.ScanOnce()
+	if len(actions) != 0 {
+		t.Errorf("空记录列表时 ScanOnce 应返回空列表，实际=%d", len(actions))
+	}
+}
+
+// TestStuckTxDetector_NonPendingSkipped 测试非 Pending 状态的记录被跳过。
+func TestStuckTxDetector_NonPendingSkipped(t *testing.T) {
+	config := DefaultStuckTxConfig()
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusPending
+		},
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{
+				{
+					TxHash:    "0xConfirmed",
+					Status:    dexwallet.TxStatusConfirmed, // 非 Pending
+					CreatedAt: time.Now().Add(-5 * time.Minute),
+				},
+				{
+					TxHash:    "0xFailed",
+					Status:    dexwallet.TxStatusFailed, // 非 Pending
+					CreatedAt: time.Now().Add(-5 * time.Minute),
+				},
+			}
+		},
+		func(record *dexwallet.TxRecord) {},
+	)
+
+	actions := detector.ScanOnce()
+	if len(actions) != 0 {
+		t.Errorf("非 Pending 状态的记录应被跳过，期望 0 个 action，实际=%d", len(actions))
+	}
+}
+
+// TestStuckTxDetector_TimeoutDetected 测试超时交易被检测到并触发 retry。
+func TestStuckTxDetector_TimeoutDetected(t *testing.T) {
+	config := DefaultStuckTxConfig()
+	config.PendingTimeout = 1 * time.Second // 缩短超时用于测试
+	config.MaxRetries = 3
+
+	var updatedRecords []*dexwallet.TxRecord
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusPending // 链上仍是 Pending
+		},
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{
+				{
+					TxHash:    "0xStuck1",
+					Status:    dexwallet.TxStatusPending,
+					CreatedAt: time.Now().Add(-5 * time.Second), // 超过 1s 超时
+				},
+			}
+		},
+		func(record *dexwallet.TxRecord) {
+			updatedRecords = append(updatedRecords, record)
+		},
+	)
+
+	actions := detector.ScanOnce()
+	if len(actions) != 1 {
+		t.Fatalf("期望 1 个 action，实际=%d", len(actions))
+	}
+
+	action := actions[0]
+	if action.TxHash != "0xStuck1" {
+		t.Errorf("期望 TxHash=0xStuck1, 实际=%s", action.TxHash)
+	}
+	if action.Action != "retry" {
+		t.Errorf("首次超时期望 Action=retry, 实际=%s", action.Action)
+	}
+	if action.Record == nil {
+		t.Error("Action.Record 不应为 nil")
+	}
+
+	// 验证重试计数增加
+	retryCount := detector.GetRetryCount("0xStuck1")
+	if retryCount != 1 {
+		t.Errorf("首次超时后重试计数期望=1, 实际=%d", retryCount)
+	}
+}
+
+// TestStuckTxDetector_TimeoutDropAfterMaxRetries 测试超时且重试次数达上限时标记为 drop。
+func TestStuckTxDetector_TimeoutDropAfterMaxRetries(t *testing.T) {
+	config := DefaultStuckTxConfig()
+	config.PendingTimeout = 1 * time.Second
+	config.MaxRetries = 2
+
+	var updatedRecords []*dexwallet.TxRecord
+
+	stuckRecord := &dexwallet.TxRecord{
+		TxHash:    "0xStuckDrop",
+		Status:    dexwallet.TxStatusPending,
+		CreatedAt: time.Now().Add(-10 * time.Second),
+	}
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusPending
+		},
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{stuckRecord}
+		},
+		func(record *dexwallet.TxRecord) {
+			updatedRecords = append(updatedRecords, record)
+		},
+	)
+
+	// 第 1 次扫描 → retry (第 1 次重试)
+	actions := detector.ScanOnce()
+	if len(actions) != 1 || actions[0].Action != "retry" {
+		t.Fatalf("第 1 次扫描期望 retry, 实际=%v", actions)
+	}
+
+	// 第 2 次扫描 → retry (第 2 次重试)
+	actions = detector.ScanOnce()
+	if len(actions) != 1 || actions[0].Action != "retry" {
+		t.Fatalf("第 2 次扫描期望 retry, 实际=%v", actions)
+	}
+
+	// 第 3 次扫描 → drop (重试次数已达上限)
+	actions = detector.ScanOnce()
+	if len(actions) != 1 {
+		t.Fatalf("第 3 次扫描期望 1 个 action, 实际=%d", len(actions))
+	}
+	if actions[0].Action != "drop" {
+		t.Errorf("重试次数达上限后期望 Action=drop, 实际=%s", actions[0].Action)
+	}
+
+	// 验证记录被更新为 Error 状态
+	if stuckRecord.Status != dexwallet.TxStatusError {
+		t.Errorf("drop 后记录状态期望=error, 实际=%s", stuckRecord.Status)
+	}
+	if stuckRecord.ErrorMsg == "" {
+		t.Error("drop 后记录的 ErrorMsg 不应为空")
+	}
+}
+
+// TestStuckTxDetector_ConfirmedOnChain 测试链上已确认成功的交易。
+func TestStuckTxDetector_ConfirmedOnChain(t *testing.T) {
+	config := DefaultStuckTxConfig()
+
+	var updatedRecords []*dexwallet.TxRecord
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusConfirmed // 链上已确认
+		},
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{
+				{
+					TxHash:    "0xSuccess",
+					Status:    dexwallet.TxStatusPending,
+					CreatedAt: time.Now().Add(-30 * time.Second),
+				},
+			}
+		},
+		func(record *dexwallet.TxRecord) {
+			updatedRecords = append(updatedRecords, record)
+		},
+	)
+
+	actions := detector.ScanOnce()
+	if len(actions) != 1 {
+		t.Fatalf("期望 1 个 action，实际=%d", len(actions))
+	}
+	if actions[0].Action != "confirm" {
+		t.Errorf("链上已确认期望 Action=confirm, 实际=%s", actions[0].Action)
+	}
+	if len(updatedRecords) != 1 {
+		t.Fatalf("期望 1 条记录被更新，实际=%d", len(updatedRecords))
+	}
+	if updatedRecords[0].Status != dexwallet.TxStatusConfirmed {
+		t.Errorf("确认后记录状态期望=confirmed, 实际=%s", updatedRecords[0].Status)
+	}
+}
+
+// TestStuckTxDetector_FailedOnChain 测试链上执行失败的交易。
+func TestStuckTxDetector_FailedOnChain(t *testing.T) {
+	config := DefaultStuckTxConfig()
+
+	var updatedRecords []*dexwallet.TxRecord
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusFailed // 链上执行失败
+		},
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{
+				{
+					TxHash:    "0xFail",
+					Status:    dexwallet.TxStatusPending,
+					CreatedAt: time.Now().Add(-30 * time.Second),
+				},
+			}
+		},
+		func(record *dexwallet.TxRecord) {
+			updatedRecords = append(updatedRecords, record)
+		},
+	)
+
+	actions := detector.ScanOnce()
+	if len(actions) != 1 {
+		t.Fatalf("期望 1 个 action，实际=%d", len(actions))
+	}
+	if actions[0].Action != "confirm_failed" {
+		t.Errorf("链上失败期望 Action=confirm_failed, 实际=%s", actions[0].Action)
+	}
+	if len(updatedRecords) != 1 {
+		t.Fatalf("期望 1 条记录被更新，实际=%d", len(updatedRecords))
+	}
+	if updatedRecords[0].Status != dexwallet.TxStatusFailed {
+		t.Errorf("失败后记录状态期望=failed, 实际=%s", updatedRecords[0].Status)
+	}
+}
+
+// TestStuckTxDetector_PendingNotTimeout 测试 Pending 但未超时的交易不产生 action。
+func TestStuckTxDetector_PendingNotTimeout(t *testing.T) {
+	config := DefaultStuckTxConfig()
+	config.PendingTimeout = 5 * time.Minute
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusPending
+		},
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{
+				{
+					TxHash:    "0xRecent",
+					Status:    dexwallet.TxStatusPending,
+					CreatedAt: time.Now().Add(-10 * time.Second), // 远未超时
+				},
+			}
+		},
+		func(record *dexwallet.TxRecord) {},
+	)
+
+	actions := detector.ScanOnce()
+	if len(actions) != 0 {
+		t.Errorf("未超时的 Pending 交易不应产生 action，实际=%d", len(actions))
+	}
+}
+
+// TestStuckTxDetector_RetryCountManagement 测试重试计数的管理。
+func TestStuckTxDetector_RetryCountManagement(t *testing.T) {
+	config := DefaultStuckTxConfig()
+	config.PendingTimeout = 1 * time.Second
+	config.MaxRetries = 5
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus {
+			return dexwallet.TxStatusPending
+		},
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{
+				{
+					TxHash:    "0xRetryTest",
+					Status:    dexwallet.TxStatusPending,
+					CreatedAt: time.Now().Add(-10 * time.Second),
+				},
+			}
+		},
+		func(record *dexwallet.TxRecord) {},
+	)
+
+	// 初始重试计数为 0
+	if detector.GetRetryCount("0xRetryTest") != 0 {
+		t.Error("初始重试计数应为 0")
+	}
+
+	// 扫描一次，重试计数增加
+	detector.ScanOnce()
+	if detector.GetRetryCount("0xRetryTest") != 1 {
+		t.Errorf("第 1 次扫描后重试计数期望=1, 实际=%d", detector.GetRetryCount("0xRetryTest"))
+	}
+
+	// 重置重试计数
+	detector.ResetRetryCount("0xRetryTest")
+	if detector.GetRetryCount("0xRetryTest") != 0 {
+		t.Errorf("重置后重试计数期望=0, 实际=%d", detector.GetRetryCount("0xRetryTest"))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// StuckTxAction 类型正确性
+// ---------------------------------------------------------------------------
+
+// TestStuckTxAction_Types 测试 StuckTxAction 的 Action 类型取值正确性。
+func TestStuckTxAction_Types(t *testing.T) {
+	// 定义所有合法的 Action 类型
+	validActions := map[string]bool{
+		"confirm":        true,
+		"confirm_failed": true,
+		"retry":          true,
+		"drop":           true,
+	}
+
+	config := DefaultStuckTxConfig()
+	config.PendingTimeout = 1 * time.Second
+	config.MaxRetries = 1
+
+	// 测试 confirm 类型
+	t.Run("confirm", func(t *testing.T) {
+		detector := NewStuckTxDetector(
+			config,
+			func(txHash string) dexwallet.TxStatus { return dexwallet.TxStatusConfirmed },
+			func() []*dexwallet.TxRecord {
+				return []*dexwallet.TxRecord{{
+					TxHash: "0x1", Status: dexwallet.TxStatusPending,
+					CreatedAt: time.Now(),
+				}}
+			},
+			func(record *dexwallet.TxRecord) {},
+		)
+		actions := detector.ScanOnce()
+		if len(actions) != 1 || !validActions[actions[0].Action] {
+			t.Errorf("Action 类型不合法: %v", actions)
+		}
+		if actions[0].Action != "confirm" {
+			t.Errorf("期望 Action=confirm, 实际=%s", actions[0].Action)
+		}
+	})
+
+	// 测试 confirm_failed 类型
+	t.Run("confirm_failed", func(t *testing.T) {
+		detector := NewStuckTxDetector(
+			config,
+			func(txHash string) dexwallet.TxStatus { return dexwallet.TxStatusFailed },
+			func() []*dexwallet.TxRecord {
+				return []*dexwallet.TxRecord{{
+					TxHash: "0x2", Status: dexwallet.TxStatusPending,
+					CreatedAt: time.Now(),
+				}}
+			},
+			func(record *dexwallet.TxRecord) {},
+		)
+		actions := detector.ScanOnce()
+		if len(actions) != 1 || actions[0].Action != "confirm_failed" {
+			t.Errorf("期望 Action=confirm_failed, 实际=%v", actions)
+		}
+	})
+
+	// 测试 retry 类型
+	t.Run("retry", func(t *testing.T) {
+		detector := NewStuckTxDetector(
+			config,
+			func(txHash string) dexwallet.TxStatus { return dexwallet.TxStatusPending },
+			func() []*dexwallet.TxRecord {
+				return []*dexwallet.TxRecord{{
+					TxHash: "0x3", Status: dexwallet.TxStatusPending,
+					CreatedAt: time.Now().Add(-10 * time.Second),
+				}}
+			},
+			func(record *dexwallet.TxRecord) {},
+		)
+		actions := detector.ScanOnce()
+		if len(actions) != 1 || actions[0].Action != "retry" {
+			t.Errorf("期望 Action=retry, 实际=%v", actions)
+		}
+	})
+
+	// 测试 drop 类型
+	t.Run("drop", func(t *testing.T) {
+		record := &dexwallet.TxRecord{
+			TxHash: "0x4", Status: dexwallet.TxStatusPending,
+			CreatedAt: time.Now().Add(-10 * time.Second),
+		}
+		detector := NewStuckTxDetector(
+			config,
+			func(txHash string) dexwallet.TxStatus { return dexwallet.TxStatusPending },
+			func() []*dexwallet.TxRecord { return []*dexwallet.TxRecord{record} },
+			func(r *dexwallet.TxRecord) {},
+		)
+		// 第 1 次 → retry（消耗唯一的重试机会，MaxRetries=1）
+		detector.ScanOnce()
+		// 第 2 次 → drop
+		actions := detector.ScanOnce()
+		if len(actions) != 1 || actions[0].Action != "drop" {
+			t.Errorf("期望 Action=drop, 实际=%v", actions)
+		}
+	})
+}
+
+// TestStuckTxAction_StructFields 测试 StuckTxAction 结构体字段完整性。
+func TestStuckTxAction_StructFields(t *testing.T) {
+	config := DefaultStuckTxConfig()
+	config.PendingTimeout = 1 * time.Second
+
+	detector := NewStuckTxDetector(
+		config,
+		func(txHash string) dexwallet.TxStatus { return dexwallet.TxStatusConfirmed },
+		func() []*dexwallet.TxRecord {
+			return []*dexwallet.TxRecord{{
+				TxHash: "0xFields", Status: dexwallet.TxStatusPending,
+				CreatedAt: time.Now(),
+			}}
+		},
+		func(record *dexwallet.TxRecord) {},
+	)
+
+	actions := detector.ScanOnce()
+	if len(actions) != 1 {
+		t.Fatalf("期望 1 个 action, 实际=%d", len(actions))
+	}
+
+	action := actions[0]
+	if action.TxHash == "" {
+		t.Error("StuckTxAction.TxHash 不应为空")
+	}
+	if action.Record == nil {
+		t.Error("StuckTxAction.Record 不应为 nil")
+	}
+	if action.Action == "" {
+		t.Error("StuckTxAction.Action 不应为空")
+	}
+	if action.Reason == "" {
+		t.Error("StuckTxAction.Reason 不应为空")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TxStateMachine 状态机测试
+// ---------------------------------------------------------------------------
+
+// TestStateMachine_LegalTransition_NewToConfirmed 合法状态转换：New -> Ready -> Pending -> Confirmed。
+func TestStateMachine_LegalTransition_NewToConfirmed(t *testing.T) {
+	record := &dexwallet.TxRecord{
+		TxHash:  "0xabc123",
+		ChainID: coinset.ChainSolana,
+		Status:  dexwallet.TxStatusNew,
+	}
+	sm := NewTxStateMachine(record)
+
+	// 初始状态应为 New
+	if sm.Current() != dexwallet.TxStatusNew {
+		t.Fatalf("初始状态期望=new, 实际=%s", sm.Current())
+	}
+
+	// New -> Ready
+	if err := sm.Transition(dexwallet.TxStatusReady, "交易已构建"); err != nil {
+		t.Fatalf("New->Ready 应合法, 错误: %v", err)
+	}
+	if sm.Current() != dexwallet.TxStatusReady {
+		t.Fatalf("转换后期望=ready, 实际=%s", sm.Current())
+	}
+
+	// Ready -> Pending
+	if err := sm.Transition(dexwallet.TxStatusPending, "交易已广播"); err != nil {
+		t.Fatalf("Ready->Pending 应合法, 错误: %v", err)
+	}
+	if sm.Current() != dexwallet.TxStatusPending {
+		t.Fatalf("转换后期望=pending, 实际=%s", sm.Current())
+	}
+
+	// Pending -> Confirmed
+	if err := sm.Transition(dexwallet.TxStatusConfirmed, "交易已确认"); err != nil {
+		t.Fatalf("Pending->Confirmed 应合法, 错误: %v", err)
+	}
+	if sm.Current() != dexwallet.TxStatusConfirmed {
+		t.Fatalf("转换后期望=confirmed, 实际=%s", sm.Current())
+	}
+}
+
+// TestStateMachine_IllegalTransition 非法状态转换应被拒绝。
+func TestStateMachine_IllegalTransition(t *testing.T) {
+	tests := []struct {
+		name string
+		from dexwallet.TxStatus
+		to   dexwallet.TxStatus
+	}{
+		{"Confirmed->Pending", dexwallet.TxStatusConfirmed, dexwallet.TxStatusPending},
+		{"Confirmed->Ready", dexwallet.TxStatusConfirmed, dexwallet.TxStatusReady},
+		{"Confirmed->New", dexwallet.TxStatusConfirmed, dexwallet.TxStatusNew},
+		{"Failed->Pending", dexwallet.TxStatusFailed, dexwallet.TxStatusPending},
+		{"Failed->Confirmed", dexwallet.TxStatusFailed, dexwallet.TxStatusConfirmed},
+		{"New->Confirmed", dexwallet.TxStatusNew, dexwallet.TxStatusConfirmed},
+		{"New->Pending", dexwallet.TxStatusNew, dexwallet.TxStatusPending},
+		{"Ready->Confirmed", dexwallet.TxStatusReady, dexwallet.TxStatusConfirmed},
+		{"Replace->New", dexwallet.TxStatusReplace, dexwallet.TxStatusNew},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record := &dexwallet.TxRecord{
+				TxHash: "0xtest",
+				Status: tt.from,
+			}
+			sm := NewTxStateMachine(record)
+			err := sm.Transition(tt.to, "测试非法转换")
+			if err == nil {
+				t.Errorf("期望 %s->%s 被拒绝, 实际无错误", tt.from, tt.to)
+			}
+			// 状态应保持不变
+			if sm.Current() != tt.from {
+				t.Errorf("非法转换后状态不应改变: 期望=%s, 实际=%s", tt.from, sm.Current())
+			}
+		})
+	}
+}
+
+// TestStateMachine_HistoryRecord 验证状态变更历史记录。
+func TestStateMachine_HistoryRecord(t *testing.T) {
+	record := &dexwallet.TxRecord{
+		TxHash: "0xhist",
+		Status: dexwallet.TxStatusNew,
+	}
+	sm := NewTxStateMachine(record)
+
+	// 初始历史为空
+	if len(sm.History()) != 0 {
+		t.Fatalf("初始历史应为空, 实际长度=%d", len(sm.History()))
+	}
+
+	// 执行一系列合法转换
+	transitions := []struct {
+		to     dexwallet.TxStatus
+		reason string
+	}{
+		{dexwallet.TxStatusReady, "构建完成"},
+		{dexwallet.TxStatusPending, "已广播"},
+		{dexwallet.TxStatusConfirmed, "已确认"},
+	}
+
+	for _, tr := range transitions {
+		if err := sm.Transition(tr.to, tr.reason); err != nil {
+			t.Fatalf("转换到 %s 失败: %v", tr.to, err)
+		}
+	}
+
+	history := sm.History()
+	if len(history) != 3 {
+		t.Fatalf("期望 3 条历史记录, 实际=%d", len(history))
+	}
+
+	// 验证第一条记录
+	if history[0].From != dexwallet.TxStatusNew || history[0].To != dexwallet.TxStatusReady {
+		t.Errorf("第 1 条记录: 期望 new->ready, 实际 %s->%s", history[0].From, history[0].To)
+	}
+	if history[0].Reason != "构建完成" {
+		t.Errorf("第 1 条记录原因: 期望='构建完成', 实际='%s'", history[0].Reason)
+	}
+
+	// 验证第二条记录
+	if history[1].From != dexwallet.TxStatusReady || history[1].To != dexwallet.TxStatusPending {
+		t.Errorf("第 2 条记录: 期望 ready->pending, 实际 %s->%s", history[1].From, history[1].To)
+	}
+
+	// 验证第三条记录
+	if history[2].From != dexwallet.TxStatusPending || history[2].To != dexwallet.TxStatusConfirmed {
+		t.Errorf("第 3 条记录: 期望 pending->confirmed, 实际 %s->%s", history[2].From, history[2].To)
+	}
+
+	// 验证时间戳单调递增
+	for i := 1; i < len(history); i++ {
+		if history[i].Timestamp.Before(history[i-1].Timestamp) {
+			t.Errorf("第 %d 条记录的时间戳早于第 %d 条", i+1, i)
+		}
+	}
+
+	// 验证 History 返回的是副本（修改不影响原始数据）
+	historyCopy := sm.History()
+	historyCopy[0].Reason = "被修改了"
+	if sm.History()[0].Reason == "被修改了" {
+		t.Error("History() 应返回副本, 修改副本不应影响原始数据")
+	}
+}
+
+// TestStateMachine_ErrorRecovery 测试 Error 状态可以恢复到 New。
+func TestStateMachine_ErrorRecovery(t *testing.T) {
+	record := &dexwallet.TxRecord{
+		TxHash: "0xerr",
+		Status: dexwallet.TxStatusNew,
+	}
+	sm := NewTxStateMachine(record)
+
+	// New -> Error
+	if err := sm.Transition(dexwallet.TxStatusError, "签名失败"); err != nil {
+		t.Fatalf("New->Error 应合法: %v", err)
+	}
+
+	// Error -> New（重试）
+	if err := sm.Transition(dexwallet.TxStatusNew, "重试"); err != nil {
+		t.Fatalf("Error->New 应合法: %v", err)
+	}
+
+	if sm.Current() != dexwallet.TxStatusNew {
+		t.Errorf("期望恢复到 new, 实际=%s", sm.Current())
+	}
+}
+
+// TestStateMachine_RevertFlow 测试 Confirmed -> Revert -> Pending 重组流程。
+func TestStateMachine_RevertFlow(t *testing.T) {
+	record := &dexwallet.TxRecord{
+		TxHash: "0xrev",
+		Status: dexwallet.TxStatusPending,
+	}
+	sm := NewTxStateMachine(record)
+
+	// Pending -> Confirmed
+	if err := sm.Transition(dexwallet.TxStatusConfirmed, "确认"); err != nil {
+		t.Fatalf("Pending->Confirmed: %v", err)
+	}
+
+	// Confirmed -> Revert（分叉回滚）
+	if err := sm.Transition(dexwallet.TxStatusRevert, "区块重组"); err != nil {
+		t.Fatalf("Confirmed->Revert: %v", err)
+	}
+
+	// Revert -> Pending（重新广播）
+	if err := sm.Transition(dexwallet.TxStatusPending, "重新广播"); err != nil {
+		t.Fatalf("Revert->Pending: %v", err)
+	}
+
+	if sm.Current() != dexwallet.TxStatusPending {
+		t.Errorf("期望状态=pending, 实际=%s", sm.Current())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RejectCode 错误码测试
+// ---------------------------------------------------------------------------
+
+// TestStateMachine_RejectCodeString 测试 RejectCode 的 String() 方法。
+func TestStateMachine_RejectCodeString(t *testing.T) {
+	tests := []struct {
+		code     RejectCode
+		contains string // 期望 String() 包含的子串
+	}{
+		{RejectOK, "成功"},
+		{RejectInvalidOrderID, "无效的订单 ID"},
+		{RejectInvalidAmount, "无效的交易金额"},
+		{RejectSlippageOverflow, "滑点超出允许范围"},
+		{RejectInsufficientBalance, "余额不足"},
+		{RejectServerError, "服务器内部错误"},
+		{RejectCode(99999), "未知错误"}, // 未定义的错误码
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("code_%d", int(tt.code)), func(t *testing.T) {
+			s := tt.code.String()
+			if s == "" {
+				t.Error("String() 不应返回空字符串")
+			}
+			// 验证包含期望子串
+			found := false
+			for i := 0; i <= len(s)-len(tt.contains); i++ {
+				if s[i:i+len(tt.contains)] == tt.contains {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("String()='%s' 应包含 '%s'", s, tt.contains)
+			}
+		})
+	}
+}
+
+// TestStateMachine_RejectCodeIsSuccess 测试 IsSuccess() 方法。
+func TestStateMachine_RejectCodeIsSuccess(t *testing.T) {
+	if !RejectOK.IsSuccess() {
+		t.Error("RejectOK.IsSuccess() 应返回 true")
+	}
+
+	failureCodes := []RejectCode{
+		RejectInvalidOrderID, RejectInvalidAmount, RejectSlippageOverflow,
+		RejectInsufficientBalance, RejectServerError,
+	}
+	for _, code := range failureCodes {
+		if code.IsSuccess() {
+			t.Errorf("RejectCode(%d).IsSuccess() 应返回 false", int(code))
+		}
+	}
+}
+
+// TestStateMachine_RejectCodeCategory 测试 Category() 方法。
+func TestStateMachine_RejectCodeCategory(t *testing.T) {
+	tests := []struct {
+		code     RejectCode
+		category string
+	}{
+		{RejectOK, "成功"},
+		{RejectInvalidOrderID, "订单参数"},
+		{RejectInvalidUserID, "订单参数"},
+		{RejectInvalidAmount, "金额费用"},
+		{RejectInvalidFee, "金额费用"},
+		{RejectInvalidSlippage, "比率滑点"},
+		{RejectSlippageOverflow, "比率滑点"},
+		{RejectInvalidContract, "合约DEX"},
+		{RejectDexNotFound, "合约DEX"},
+		{RejectInsufficientBalance, "余额流动性"},
+		{RejectGasTooHigh, "余额流动性"},
+		{RejectLiquidityTooLow, "余额流动性"},
+		{RejectServerError, "内部错误"},
+		{RejectCode(50000), "未知分类"}, // 未定义的段
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("code_%d", int(tt.code)), func(t *testing.T) {
+			got := tt.code.Category()
+			if got != tt.category {
+				t.Errorf("RejectCode(%d).Category() = '%s', 期望='%s'", int(tt.code), got, tt.category)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NonceManager 测试
+// ---------------------------------------------------------------------------
+
+// mockGetTransactionCount 模拟链上 nonce 查询，返回固定值。
+func mockGetTransactionCount(startNonce uint64) func(string) (uint64, error) {
+	return func(_ string) (uint64, error) {
+		return startNonce, nil
+	}
+}
+
+// TestNonceManager_AcquireFirstSync 首次 AcquireNonce 应从链上同步。
+func TestNonceManager_AcquireFirstSync(t *testing.T) {
+	var syncCalled atomic.Int64
+	nm := NewNonceManager(func(address string) (uint64, error) {
+		syncCalled.Add(1)
+		return 42, nil
+	})
+
+	nonce, release, err := nm.AcquireNonce("0xABC")
+	if err != nil {
+		t.Fatalf("AcquireNonce 失败: %v", err)
+	}
+	release()
+
+	if nonce != 42 {
+		t.Errorf("首次 nonce 期望=42 (链上值), 实际=%d", nonce)
+	}
+	if syncCalled.Load() != 1 {
+		t.Errorf("期望调用 1 次链上查询, 实际=%d", syncCalled.Load())
+	}
+}
+
+// TestNonceManager_AcquireIncrement 多次 AcquireNonce 应递增。
+func TestNonceManager_AcquireIncrement(t *testing.T) {
+	nm := NewNonceManager(mockGetTransactionCount(10))
+
+	// 获取首次 nonce（同步后值为 10）
+	nonce1, release1, err := nm.AcquireNonce("0xABC")
+	if err != nil {
+		t.Fatalf("第 1 次 AcquireNonce 失败: %v", err)
+	}
+	release1()
+
+	if nonce1 != 10 {
+		t.Errorf("第 1 次 nonce 期望=10, 实际=%d", nonce1)
+	}
+
+	// 第二次应递增
+	nonce2, release2, err := nm.AcquireNonce("0xABC")
+	if err != nil {
+		t.Fatalf("第 2 次 AcquireNonce 失败: %v", err)
+	}
+	release2()
+
+	if nonce2 != 11 {
+		t.Errorf("第 2 次 nonce 期望=11, 实际=%d", nonce2)
+	}
+
+	// 第三次继续递增
+	nonce3, release3, err := nm.AcquireNonce("0xABC")
+	if err != nil {
+		t.Fatalf("第 3 次 AcquireNonce 失败: %v", err)
+	}
+	release3()
+
+	if nonce3 != 12 {
+		t.Errorf("第 3 次 nonce 期望=12, 实际=%d", nonce3)
+	}
+}
+
+// TestNonceManager_ResetNonce 测试 ResetNonce 后重新同步。
+func TestNonceManager_ResetNonce(t *testing.T) {
+	callCount := atomic.Int64{}
+	nm := NewNonceManager(func(address string) (uint64, error) {
+		count := callCount.Add(1)
+		if count <= 1 {
+			return 10, nil // 首次同步返回 10
+		}
+		return 20, nil // 重置后同步返回 20
+	})
+
+	// 首次获取
+	nonce1, release1, err := nm.AcquireNonce("0xABC")
+	if err != nil {
+		t.Fatalf("首次 AcquireNonce 失败: %v", err)
+	}
+	release1()
+	if nonce1 != 10 {
+		t.Errorf("首次 nonce 期望=10, 实际=%d", nonce1)
+	}
+
+	// 第二次获取（本地递增到 11）
+	nonce2, release2, err := nm.AcquireNonce("0xABC")
+	if err != nil {
+		t.Fatalf("第二次 AcquireNonce 失败: %v", err)
+	}
+	release2()
+	if nonce2 != 11 {
+		t.Errorf("第二次 nonce 期望=11, 实际=%d", nonce2)
+	}
+
+	// 重置 nonce
+	nm.ResetNonce("0xABC")
+
+	// 重置后应重新从链上同步（返回 20）
+	nonce3, release3, err := nm.AcquireNonce("0xABC")
+	if err != nil {
+		t.Fatalf("重置后 AcquireNonce 失败: %v", err)
+	}
+	release3()
+	if nonce3 != 20 {
+		t.Errorf("重置后 nonce 期望=20 (新的链上值), 实际=%d", nonce3)
+	}
+}
+
+// TestNonceManager_ResetNonce_NonExistentAddress 重置不存在的地址应无副作用。
+func TestNonceManager_ResetNonce_NonExistentAddress(t *testing.T) {
+	nm := NewNonceManager(mockGetTransactionCount(0))
+
+	// 重置一个从未使用过的地址，不应 panic
+	nm.ResetNonce("0xNonExistent")
+}
+
+// TestNonceManager_PeekNonce 测试 PeekNonce 返回正确值。
+func TestNonceManager_PeekNonce(t *testing.T) {
+	nm := NewNonceManager(mockGetTransactionCount(15))
+
+	// 地址不存在时，PeekNonce 应直接查链上
+	nonce, err := nm.PeekNonce("0xABC")
+	if err != nil {
+		t.Fatalf("PeekNonce 失败: %v", err)
+	}
+	if nonce != 15 {
+		t.Errorf("PeekNonce (未同步) 期望=15, 实际=%d", nonce)
+	}
+
+	// 先 AcquireNonce 同步并递增
+	n, release, err := nm.AcquireNonce("0xABC")
+	if err != nil {
+		t.Fatalf("AcquireNonce 失败: %v", err)
+	}
+	release()
+	if n != 15 {
+		t.Errorf("AcquireNonce 期望=15, 实际=%d", n)
+	}
+
+	// PeekNonce 应返回递增后的值（16）
+	nonce, err = nm.PeekNonce("0xABC")
+	if err != nil {
+		t.Fatalf("PeekNonce 失败: %v", err)
+	}
+	if nonce != 16 {
+		t.Errorf("PeekNonce (已同步) 期望=16, 实际=%d", nonce)
+	}
+}
+
+// TestNonceManager_PeekNonce_RPCError 测试 PeekNonce 在 RPC 失败时返回错误。
+func TestNonceManager_PeekNonce_RPCError(t *testing.T) {
+	nm := NewNonceManager(func(_ string) (uint64, error) {
+		return 0, fmt.Errorf("RPC 不可用")
+	})
+
+	_, err := nm.PeekNonce("0xABC")
+	if err == nil {
+		t.Fatal("RPC 失败时 PeekNonce 应返回错误")
+	}
+}
+
+// TestNonceManager_AcquireNonce_RPCError 测试首次同步 RPC 失败。
+func TestNonceManager_AcquireNonce_RPCError(t *testing.T) {
+	nm := NewNonceManager(func(_ string) (uint64, error) {
+		return 0, fmt.Errorf("RPC 连接失败")
+	})
+
+	_, _, err := nm.AcquireNonce("0xABC")
+	if err == nil {
+		t.Fatal("RPC 失败时 AcquireNonce 应返回错误")
+	}
+}
+
+// TestNonceManager_MultipleAddresses 不同地址应独立管理 nonce。
+func TestNonceManager_MultipleAddresses(t *testing.T) {
+	nm := NewNonceManager(func(address string) (uint64, error) {
+		switch address {
+		case "0xAAA":
+			return 100, nil
+		case "0xBBB":
+			return 200, nil
+		default:
+			return 0, nil
+		}
+	})
+
+	nonceA, releaseA, err := nm.AcquireNonce("0xAAA")
+	if err != nil {
+		t.Fatalf("AcquireNonce(0xAAA) 失败: %v", err)
+	}
+	releaseA()
+
+	nonceB, releaseB, err := nm.AcquireNonce("0xBBB")
+	if err != nil {
+		t.Fatalf("AcquireNonce(0xBBB) 失败: %v", err)
+	}
+	releaseB()
+
+	if nonceA != 100 {
+		t.Errorf("地址 0xAAA 的 nonce 期望=100, 实际=%d", nonceA)
+	}
+	if nonceB != 200 {
+		t.Errorf("地址 0xBBB 的 nonce 期望=200, 实际=%d", nonceB)
+	}
+}
+
+// TestNonceManager_ConcurrentAcquire 并发安全测试：多个 goroutine 同时 AcquireNonce。
+func TestNonceManager_ConcurrentAcquire(t *testing.T) {
+	nm := NewNonceManager(mockGetTransactionCount(0))
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	nonces := make([]uint64, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			nonce, release, err := nm.AcquireNonce("0xConcurrent")
+			if err != nil {
+				t.Errorf("goroutine %d: AcquireNonce 失败: %v", idx, err)
+				return
+			}
+			nonces[idx] = nonce
+			// 模拟使用 nonce 的时间
+			time.Sleep(1 * time.Millisecond)
+			release()
+		}(i)
+	}
+
+	wg.Wait()
+
+	// 验证所有 nonce 都是唯一的（无重复）
+	seen := make(map[uint64]bool)
+	for i, n := range nonces {
+		if seen[n] {
+			t.Errorf("nonce %d 被重复分配 (goroutine %d)", n, i)
+		}
+		seen[n] = true
+	}
+
+	// 验证 nonce 范围：从 0 开始，连续分配到 goroutines-1
+	if len(seen) != goroutines {
+		t.Errorf("期望 %d 个唯一 nonce, 实际=%d", goroutines, len(seen))
+	}
+
+	for n := uint64(0); n < goroutines; n++ {
+		if !seen[n] {
+			t.Errorf("缺少 nonce %d", n)
+		}
+	}
+}
+
+// TestNonceManager_ConcurrentDifferentAddresses 不同地址的并发操作互不阻塞。
+func TestNonceManager_ConcurrentDifferentAddresses(t *testing.T) {
+	nm := NewNonceManager(func(address string) (uint64, error) {
+		return 0, nil
+	})
+
+	var wg sync.WaitGroup
+	addresses := []string{"0xAddr1", "0xAddr2", "0xAddr3", "0xAddr4", "0xAddr5"}
+
+	for _, addr := range addresses {
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func(a string) {
+				defer wg.Done()
+				nonce, release, err := nm.AcquireNonce(a)
+				if err != nil {
+					t.Errorf("AcquireNonce(%s) 失败: %v", a, err)
+					return
+				}
+				_ = nonce
+				time.Sleep(1 * time.Millisecond)
+				release()
+			}(addr)
+		}
+	}
+
+	wg.Wait()
+	// 能跑到这里不 panic/deadlock 就说明不同地址的并发操作是安全的
+}

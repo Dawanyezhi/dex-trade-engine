@@ -239,13 +239,12 @@ func (g *GasOracle) trendLocked() string {
 
 	// 后半段均值 > 前半段均值 * 1.05 -> 上升趋势
 	// 后半段均值 < 前半段均值 * 0.95 -> 下降趋势
-	// 使用整数运算避免浮点精度问题：
-	//   avgSecond > avgFirst * 105 / 100
-	//   avgSecond < avgFirst * 95 / 100
-	if avgSecond > avgFirst*105/100 {
+	// 避免 avgFirst*105 溢出 uint64：改用 avgSecond*100 与 avgFirst*105 比较
+	// 等价于 avgSecond/avgFirst > 1.05，但用乘法替代除法保留精度
+	if avgSecond*100 > avgFirst*105 {
 		return "rising"
 	}
-	if avgSecond < avgFirst*95/100 {
+	if avgSecond*100 < avgFirst*95 {
 		return "falling"
 	}
 	return "stable"

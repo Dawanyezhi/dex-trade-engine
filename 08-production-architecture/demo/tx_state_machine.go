@@ -170,3 +170,4 @@ func (r RejectCode) Category() string {
 		return "未知分类"
 	}
 }
+

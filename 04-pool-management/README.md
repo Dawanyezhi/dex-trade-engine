@@ -102,8 +102,11 @@ active ────────────────────────�
     demo/
         repository.go          -- 内存池子存储实现
         pool_manager.go        -- 池子管理器演示实现
+        pool_parser.go         -- 池子数据解析路由器（按 ProgramID/Factory 分发解析）
+        stablecoin_cache.go    -- 稳定币分层缓存（stable-stable/stable-normal/normal-normal 三档 TTL）
         main.go                -- 可运行演示
         pool_test.go           -- 测试
+        pool_parser_test.go    -- PoolParser 测试
 ```
 
 ## 与生产系统的差距

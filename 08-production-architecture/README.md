@@ -59,6 +59,9 @@
     rate_limiter.go      -- 令牌桶限流器 + Worker 池 + SwapQueue
     chain_config.go      -- 多链配置管理与热更新
     monitor_demo.go      -- 监控服务与告警演示
+    tx_state_machine.go  -- 交易状态机（8 态 + ValidTransitions + RejectCode 错误码）
+    stuck_tx.go          -- Stuck 交易检测器（超时扫描 + 重试/丢弃生命周期）
+    nonce_manager.go     -- EVM 地址级 Nonce 管理（per-address mutex + 本地追踪 + 链上同步）
     main.go              -- 端到端演示程序
     production_test.go   -- 测试
 ```

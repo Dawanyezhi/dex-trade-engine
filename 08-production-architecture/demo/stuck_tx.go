@@ -335,3 +335,4 @@ func (d *StuckTxDetector) GetRetryCount(txHash string) int {
 func (d *StuckTxDetector) ResetRetryCount(txHash string) {
 	delete(d.retryCounts, txHash)
 }
+

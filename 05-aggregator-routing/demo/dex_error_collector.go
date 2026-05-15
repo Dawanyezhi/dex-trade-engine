@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/yys9517/onchain-dex-lab/internal/dexwallet"
 )
@@ -55,6 +56,7 @@ type DexError struct {
 //   "[High: 2 errors] pump_fun: InsufficientBalance; moonshot: Timeout"
 //   运维一眼就能判断问题出在哪个层级。
 type DexErrorCollector struct {
+	mu                   sync.Mutex // 保护并发写入（多个 goroutine 同时 AddError）
 	HighPriorityErrors   []DexError // 高优先级 DEX 的错误（内盘，如 Pump）
 	MiddlePriorityErrors []DexError // 中优先级 DEX 的错误（AMM/CLMM，如 Raydium）
 	LowPriorityErrors    []DexError // 低优先级 DEX 的错误（聚合器，如 Jupiter）
@@ -79,6 +81,9 @@ func NewDexErrorCollector(totalCount int) *DexErrorCollector {
 // 根据 priority 将错误分配到对应的分组（高/中/低），
 // 便于后续按重要性排序分析。
 func (c *DexErrorCollector) AddError(dexID dexwallet.DexID, label string, priority dexwallet.DexPriority, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	de := DexError{
 		DexID:    dexID,
 		DexLabel: label,
@@ -104,6 +109,8 @@ func (c *DexErrorCollector) AddError(dexID dexwallet.DexID, label string, priori
 // 有些 DEX 对特定交易对返回 nil（而非错误），表示该 DEX 不支持此交易对。
 // 这不算错误，但需要记录，便于在摘要中展示完整信息。
 func (c *DexErrorCollector) AddNilResult(label string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.NilResultDexes = append(c.NilResultDexes, label)
 }
 
@@ -112,6 +119,13 @@ func (c *DexErrorCollector) AddNilResult(label string) {
 // 高优先级错误排在前面，因为它们最有诊断价值。
 // 调用方可以遍历此列表做自定义分析或上报。
 func (c *DexErrorCollector) GetAllErrors() []DexError {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.getAllErrorsLocked()
+}
+
+// getAllErrorsLocked 内部方法，调用方需持有锁。
+func (c *DexErrorCollector) getAllErrorsLocked() []DexError {
 	all := make([]DexError, 0, len(c.HighPriorityErrors)+len(c.MiddlePriorityErrors)+len(c.LowPriorityErrors))
 	all = append(all, c.HighPriorityErrors...)
 	all = append(all, c.MiddlePriorityErrors...)
@@ -133,7 +147,10 @@ func (c *DexErrorCollector) GetAllErrors() []DexError {
 //   因为即使网络恢复，这笔交易也不会成功。
 //   业务错误能帮助用户采取正确的行动（如充值），而技术错误只会让用户困惑。
 func (c *DexErrorCollector) AnalyzeAndReturnError() error {
-	allErrors := c.GetAllErrors()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	allErrors := c.getAllErrorsLocked()
 
 	// 没有任何错误记录
 	if len(allErrors) == 0 && len(c.NilResultDexes) == 0 {
@@ -141,7 +158,7 @@ func (c *DexErrorCollector) AnalyzeAndReturnError() error {
 	}
 
 	// 优先查找业务错误
-	if bizErr := c.findFirstBusinessError(); bizErr != nil {
+	if bizErr := c.findFirstBusinessErrorLocked(); bizErr != nil {
 		return bizErr
 	}
 
@@ -166,8 +183,8 @@ func (c *DexErrorCollector) AnalyzeAndReturnError() error {
 //
 // 使用 errors.As 识别错误类型，与 dexwallet/errors.go 中定义的错误类型对应。
 // 这样即使错误被 DegradableError/NonDegradableError 包装过，也能正确识别。
-func (c *DexErrorCollector) findFirstBusinessError() error {
-	allErrors := c.GetAllErrors()
+func (c *DexErrorCollector) findFirstBusinessErrorLocked() error {
+	allErrors := c.getAllErrorsLocked()
 
 	// 第一轮：查找 InsufficientBalanceError（最高优先级业务错误）
 	for _, de := range allErrors {
@@ -208,6 +225,9 @@ func (c *DexErrorCollector) findFirstBusinessError() error {
 // 该输出可直接作为告警内容发送到 Slack/PagerDuty 等告警系统。
 // 运维人员能一眼看出：哪个优先级层级出了什么问题、有多少 DEX 不支持该交易对。
 func (c *DexErrorCollector) FormatSummary() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("all dex(%d) failed: ", c.TotalDexCount))
@@ -305,6 +325,9 @@ func shortenError(err error) string {
 // 返回：比 selectedPriority 更高优先级的错误列表的格式化字符串。
 // 如果没有更高优先级的错误，返回空字符串。
 func (c *DexErrorCollector) LogHigherPriorityWarnings(selectedPriority dexwallet.DexPriority) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	var warnings []string
 
 	// 如果选中的是中优先级，警告高优先级的错误
