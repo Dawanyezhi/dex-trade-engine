@@ -68,6 +68,7 @@ graph TB
     S_PARSER --> MQ_OUT
     S_MONITOR --> S_LOOP
 ```
+![img.png](../asset/基础设施架构图.png)
 
 ### 1.3 三层代码抽象
 
@@ -143,7 +144,7 @@ sequenceDiagram
     par 获取池子
         Wallet->>Pool: GetBestPool(tokenA, tokenB)
     and 获取费用
-        Wallet->>Chain: GetRecommendedFee()
+        Wallet->>Chain: GetRecommendedFee()（网络费/优先费/加速费）
     end
 
     Note over Wallet: 3. 聚合报价
@@ -179,6 +180,36 @@ sequenceDiagram
     Wallet->>TX: Confirm(TxHash)
     TX->>Chain: 轮询状态
     TX-->>Wallet: Confirmed
+```
+![img.png](../asset/Swap%20请求流.png)
+
+#### 获取费用说明
+
+Swap 请求流中的“获取费用”指的是**链上交易执行和发送相关的推荐费用**，用于后续余额校验、交易构建、费用上限控制和发送策略选择。它不是 AMM 池子手续费，也不是聚合器服务费。
+
+Solana 侧主要包括：
+
+- 基础签名费：通常为 `5000 lamports / signature`。
+- 优先费：通过 `ComputeBudget::SetComputeUnitPrice` 设置，费用约等于 `ComputeUnitPrice * ComputeUnitLimit`。
+- 贿赂费 / tip：发送到 NextBlock、Temporal、ZeroSlot、Jito 类私有通道时使用的额外激励。
+
+EVM 侧主要包括：
+
+- `gasLimit`：通过 `eth_estimateGas` 估算。
+- `baseFee`：由 EIP-1559 网络状态决定。
+- `maxPriorityFeePerGas`：给 validator / builder 的小费。
+- `maxFeePerGas`：用户愿意支付的最高 gas 单价，通常按 `baseFee * 2 + priorityFee` 留余量。
+- `gasPrice`：BSC 等 legacy gas 链使用。
+- `approve` 交易的额外 gas：首次授权或额度不足时需要纳入总成本。
+
+与之相对，AMM LP 手续费、DEX protocol fee、Jupiter aggregator fee 和平台服务费通常体现在报价结果里，例如 `outAmount`、`feeRate`、`priceImpact`，不属于这里的 `GetRecommendedFee()`。
+
+生产实现中建议进一步拆分：
+
+```text
+FeeOracle.GetRecommendedPriorityFee()
+BribeService.GetRecommendedTip()
+GasEstimator.EstimateGas()
 ```
 
 ### 2.2 事件同步流
@@ -226,6 +257,7 @@ sequenceDiagram
         Syncer->>DB: 更新同步高度
     end
 ```
+![img.png](../asset/事件同步流.png)
 
 ### 2.3 池子更新流
 
@@ -261,6 +293,7 @@ graph LR
     CACHE --> AGG
     CACHE --> QUOTE
 ```
+![img.png](../asset/池子更新流.png)
 
 ## 三、Solana vs EVM 架构差异
 

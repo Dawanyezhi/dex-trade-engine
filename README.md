@@ -189,7 +189,7 @@ flowchart TB
     SOL_EVENT --> NODES
     EVM_EVENT --> NODES
 ```
-
+![img.png](asset/系统架构图.png)
 ---
 
 ## 三层抽象设计
